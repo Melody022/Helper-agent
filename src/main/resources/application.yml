@@ -46,6 +46,12 @@ spring:
 
   # 主聊天模型 = MIMO（OpenAI 兼容）
   ai:
+    model:
+      # 向量模型只留 DashScope 一个。Ollama starter 默认也会注册 EmbeddingModel，
+      # 不锁定的话容器里会有两个 EmbeddingModel Bean，M8 注入时直接歧义。
+      # 注意不要设 spring.ai.model.chat——chat 是单选属性，一设就会把另一个聊天模型关掉，
+      # 而我们要同时保留 MIMO（主）和 Ollama（小模型）。
+      embedding: openai
     openai:
       base-url: ${MIMO_BASE_URL:https://api.xiaomimimo.com/v1}
       api-key: ${MIMO_API_KEY:}
@@ -58,6 +64,15 @@ spring:
         api-key: ${DASHSCOPE_API_KEY:}
         options:
           model: text-embedding-v4
+
+    # 第 2 层意图识别的小模型：本地 Ollama（走原生客户端，base-url 不要带 /v1）
+    ollama:
+      base-url: ${OLLAMA_BASE_URL:http://localhost:11434}
+      chat:
+        options:
+          model: ${OLLAMA_MODEL:qwen2.5:7b}
+          # 分类任务要的是稳定复现，不是文采
+          temperature: 0.0
 
 mybatis-plus:
   configuration:
@@ -83,18 +98,6 @@ springdoc:
     path: /swagger-ui.html
   default-produces-media-type: application/json
 
-# 模型与服务端点（多 provider 动态路由用）
-ai-model:
-  mimo:
-    base-url: ${MIMO_BASE_URL:https://api.xiaomimimo.com/v1}
-    api-key: ${MIMO_API_KEY:}
-    model: ${MIMO_MODEL:mimo-v2.5}
-  # 第 2 层小模型意图识别：本地 Ollama
-  small:
-    base-url: ${OLLAMA_BASE_URL:http://localhost:11434/v1}
-    model: ${OLLAMA_MODEL:qwen2.5:7b}
-    api-key: ${OLLAMA_API_KEY:}
-
 # 会话与记忆
 ai-session:
   title: "你好，我是机械家AI助手"
@@ -109,12 +112,33 @@ ai-session:
 # 路由链（7 步短路）：身份 → 命令 → 会话粘性 → 指代消解 → 三层意图 → Agent 匹配 → 审计
 routing:
   enabled: ${AI_INTENT_ROUTING_ENABLED:true}
+
+  # 会话粘性：未过期时倾向复用上一轮 Agent
   sticky:
     enabled: true
     ttl-minutes: ${AI_STICKY_TTL_MINUTES:30}
+    # 意图置信度达到该值且指向别的领域时才切换 Agent；低于它则沿用上一轮，保证对话连贯
+    switch-confidence: 0.7
+
+  # 第 1 层关键词加权分类
   keyword:
     high-weight: 0.9
     mid-weight: 0.7
+
+  # 第 4 层指代消解（用小模型改写"这个/那台"这类说法）
+  reference:
+    enabled: true
+
+  # 第 2 层小模型的采信阈值。小模型常对错误答案也给高分，所以门槛设得比大模型高
+  small-model:
+    min-confidence: 0.6
+
+  # 第 3 层大模型的采信阈值。它是最后一层，再拦就只能 UNKNOWN，所以门槛放低
+  llm:
+    min-confidence: 0.4
+
+  # 置 false 可关闭后两层模型，只跑关键词分类（离线回归 / 降本时用）
+  model-layers-enabled: ${AI_MODEL_LAYERS_ENABLED:true}
 
 # RAG（M6/M8 使用）
 rag:
@@ -135,4 +159,8 @@ logging:
   level:
     root: info
     com.jixiejia.agent: debug
+    # Mapper 包单独压到 info：MyBatis 的 SQL 日志挂在 mapper 接口的 DEBUG 级别上，
+    # 不覆盖的话启动阶段光是工具注册的增删改查就会刷几百行。
+    # 排查 SQL 时把下面这行临时改成 debug。
+    com.jixiejia.agent.persistence.mapper: info
     org.bsc.langgraph4j: info

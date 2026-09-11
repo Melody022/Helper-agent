@@ -75,6 +75,18 @@
             <artifactId>spring-ai-starter-model-openai</artifactId>
         </dependency>
 
+        <!--
+          第 2 层意图识别的小模型走本地 Ollama。
+          用官方 Ollama starter 而不是「OpenAI 兼容端点」：Spring AI 2.0 起 OpenAI 客户端
+          底层换成了官方 openai-java SDK，要指到 Ollama 得自己搭 OpenAIClient；
+          而 Ollama 的 OpenAI 兼容层与原生 /api/chat 行为并不完全一致（如 format 参数），
+          走原生客户端更省事也更稳。
+        -->
+        <dependency>
+            <groupId>org.springframework.ai</groupId>
+            <artifactId>spring-ai-starter-model-ollama</artifactId>
+        </dependency>
+
         <!-- LangGraph4j：状态图编排（interrupt/resume、checkpoint saver、stream） -->
         <dependency>
             <groupId>org.bsc.langgraph4j</groupId>
