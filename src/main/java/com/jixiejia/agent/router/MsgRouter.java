@@ -4,30 +4,34 @@ import com.baomidou.mybatisplus.core.toolkit.Wrappers;
 import com.jixiejia.agent.classify.Intent;
 import com.jixiejia.agent.classify.IntentClassifier;
 import com.jixiejia.agent.classify.IntentResult;
+import com.jixiejia.agent.classify.KeywordWeightClassifier;
 import com.jixiejia.agent.persistence.entity.ai.AiUser;
 import com.jixiejia.agent.persistence.mapper.ai.AiUserMapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
 import java.util.Optional;
 import java.util.Set;
 
 /**
- * 消息路由链：① 身份 → ② 系统命令 → ③ 会话粘性 → ④ 指代消解 → ⑤ 三层意图 → ⑥ Agent 匹配 → ⑦ 审计。
+ * 消息路由链：① 身份 → ② 命令 → ③ 粘性 → ④ 指代消解 → ⑤ 三层意图 → ⑥ Agent 匹配 → ⑦ 审计。
  *
- * <p>整体设计取向是<b>确定性优先</b>：能靠规则、缓存、白名单判定的，一律不交给模型。
+ * <p>整条链的取向是<b>确定性优先 + 从便宜到贵</b>：能靠规则、缓存、白名单判定的绝不交给模型；
  * 模型只在第 ⑤ 步参与，且它的输出还要过一遍枚举校验。这样即使模型乱答，
  * 最坏也只是落进兜底 Agent，不会触发越权动作或错误路由。
  *
- * <p>关于第 ③ 步的实现取向：粘性<b>不是</b>在分类之前无条件短路。原因是如果先短路，
- * 就永远没机会发现"用户其实换话题了"。所以这里的做法是——先照常分类，
- * 再拿粘性结果做仲裁：
+ * <p>第 ③ 步是整个设计里最省成本的一环。它先做一次<b>零成本的关键词扫描</b>，
+ * 再据此决定要不要惊动模型：
  * <ul>
- *   <li>本轮分类置信度不足（或判为 UNKNOWN）时，沿用上一轮 Agent，保证对话连贯；</li>
- *   <li>本轮分类高置信且指向别的领域时，切过去（对应方案里"高置信不同意图自动切换"）。</li>
+ *   <li>关键词命中明确意图 X —— 和粘性里的意图比：一样就继续沿用，不一样立刻切换。
+ *       这一步完全不调模型。</li>
+ *   <li>关键词没命中（"那这个呢""多少钱"这种半截话）—— 只要粘性还在，
+ *       就直接沿用上一轮的 Agent，<b>同样不调模型</b>。追问本来就不该重新分类。</li>
+ *   <li>只有"关键词没命中 且 没有粘性"才升级到第 ④⑤ 步叫模型。</li>
  * </ul>
+ * 换句话说：粘性不是"信任上一轮"，而是"用免费的关键词扫描先确认没换话题，
+ * 确认不了再交给粘性兜底"。
  */
 @Slf4j
 @Component
@@ -55,13 +59,10 @@ public class MsgRouter {
     private final StickySessionStore stickySessionStore;
     private final ConversationMemory conversationMemory;
     private final ReferenceResolver referenceResolver;
+    private final KeywordWeightClassifier keywordClassifier;
     private final IntentClassifier intentClassifier;
     private final AgentRegistry agentRegistry;
     private final AuditService auditService;
-
-    /** 意图置信度达到多少才允许"甩开粘性、切换到别的 Agent" */
-    @Value("${routing.sticky.switch-confidence:0.7}")
-    private double stickySwitchConfidence;
 
     /**
      * 执行一次路由。本方法只做判定，不执行 Agent、不落消息——
@@ -81,100 +82,158 @@ public class MsgRouter {
 
     private RoutingDecision doRoute(RoutingRequest request, long start) {
         String message = request.message() == null ? "" : request.message().trim();
+        String roleKey = request.effectiveRoleKey();
 
-        // ---------- ① 身份检查 ----------
+        // ---------- ① 身份检查：必须已登录 ----------
         Optional<RoutingDecision> identityBlock = checkIdentity(request);
         if (identityBlock.isPresent()) {
-            RoutingDecision d = identityBlock.get();
-            auditService.record(request, d.stage(), d.intent(), d.confidence(), d.classifyLayer(),
-                    null, Set.of(), d.reason(), elapsed(start));
-            return d;
+            return auditAndReturn(request, identityBlock.get(), start);
         }
 
         // ---------- ② 系统命令 ----------
         Optional<CommandHandler.CommandResult> command =
                 commandHandler.handle(message, request.conversationId());
         if (command.isPresent()) {
-            RoutingDecision d = RoutingDecision.shortCircuit(RouteStage.COMMAND, Intent.UNKNOWN,
-                    command.get().reply(), "命中系统命令 " + command.get().command());
-            auditService.record(request, d.stage(), d.intent(), d.confidence(), d.classifyLayer(),
-                    null, Set.of(), d.reason(), elapsed(start));
-            return d;
+            return auditAndReturn(request,
+                    RoutingDecision.shortCircuit(RouteStage.COMMAND, Intent.UNKNOWN,
+                            command.get().reply(), "命中系统命令 " + command.get().command()),
+                    start);
         }
 
-        // ---------- ③ 会话粘性（先读出来，最后仲裁用） ----------
+        // ---------- ③ 粘性 + 零成本关键词扫描 ----------
         Optional<StickySessionStore.StickySession> sticky =
                 stickySessionStore.find(request.conversationId());
+        Optional<IntentResult> byKeyword = keywordClassifier.classify(message);
 
-        // ---------- ④ 指代消解 ----------
+        if (byKeyword.isPresent()) {
+            return routeByKnownIntent(request, byKeyword.get(), sticky, roleKey, start);
+        }
+
+        // 关键词没命中：模糊追问优先用粘性兜住，避免白跑一次模型
+        if (sticky.isPresent()) {
+            Optional<AgentRegistry.AgentMatch> reuse =
+                    agentRegistry.byKey(sticky.get().agentKey(), roleKey);
+            if (reuse.isPresent()) {
+                Intent stickyIntent = Intent.parse(sticky.get().intent());
+                RoutingDecision decision = new RoutingDecision(
+                        RouteStage.STICKY, stickyIntent, 1.0, null,
+                        reuse.get().agentKey(), reuse.get().toolNames(), message,
+                        null, "关键词未命中，沿用会话粘性 Agent=" + reuse.get().agentKey());
+                log.debug("粘性兜底：{} -> {}", message, reuse.get().agentKey());
+                return auditAndReturn(request, decision, start);
+            }
+            // 粘性里的 Agent 已被停用或删除，只能重新分类
+            log.debug("粘性 Agent {} 已不可用，重新分类", sticky.get().agentKey());
+        }
+
+        // ---------- ④ 指代消解（只有真要叫模型时才做）----------
         String recentTurns = conversationMemory.recentTurnsAsText(request.conversationId(), 5);
         ReferenceResolver.Resolution resolution = referenceResolver.resolve(message, recentTurns);
-        String resolvedText = resolution.text();
 
         // ---------- ⑤ 三层意图分类 ----------
-        IntentResult intent = intentClassifier.classify(resolvedText, recentTurns);
+        IntentResult intent = intentClassifier.classify(resolution.text(), recentTurns);
         log.debug("意图分类：{} conf={} layer={}", intent.intent(), intent.confidence(), intent.layer());
 
-        // 短路意图：转人工 / 投诉，不进 Agent
-        if (intent.intent() == Intent.HANDOFF) {
-            RoutingDecision d = RoutingDecision.shortCircuit(RouteStage.HANDOFF, intent.intent(),
-                    HANDOFF_REPLY, "意图判为转人工");
-            afterRoute(request, intent, d, Set.of(), d.reason(), start);
-            return d;
-        }
-        if (intent.intent() == Intent.COMPLAINT) {
-            RoutingDecision d = RoutingDecision.shortCircuit(RouteStage.COMPLAINT, intent.intent(),
-                    COMPLAINT_REPLY, "意图判为投诉");
-            afterRoute(request, intent, d, Set.of(), d.reason(), start);
-            return d;
+        if (intent.intent().isShortCircuit()) {
+            return auditAndReturn(request, shortCircuitFor(intent), start);
         }
 
-        // ---------- ⑥ Agent 匹配（含粘性仲裁） ----------
-        boolean reuseSticky = shouldReuseSticky(intent, sticky);
-        String roleKey = request.effectiveRoleKey();
-
-        Optional<AgentRegistry.AgentMatch> matched = reuseSticky
-                ? agentRegistry.byKey(sticky.get().agentKey(), roleKey)
-                        .or(() -> agentRegistry.match(intent.intent(), roleKey))
-                : agentRegistry.match(intent.intent(), roleKey);
-
-        // 兜底链：意图匹配不到（如 CROSS_DOMAIN 这类）就退到 GeneralAgent；
-        // 连兜底 Agent 都被停用了才算真的无人可用。
-        AgentRegistry.AgentMatch match = matched
-                .or(() -> agentRegistry.fallback(roleKey))
-                .orElse(null);
-
+        // ---------- ⑥ Agent 匹配 ----------
+        AgentRegistry.AgentMatch match = matchAgent(intent.intent(), roleKey, null);
         if (match == null) {
-            RoutingDecision d = RoutingDecision.shortCircuit(RouteStage.ERROR, intent.intent(),
-                    NO_AGENT_REPLY, "Agent 注册表中没有可用 Agent");
-            afterRoute(request, intent, d, Set.of(), d.reason(), start);
-            return d;
+            return auditAndReturn(request,
+                    RoutingDecision.shortCircuit(RouteStage.ERROR, intent.intent(),
+                            NO_AGENT_REPLY, "Agent 注册表中没有可用 Agent"), start);
         }
 
-        RouteStage stage = reuseSticky ? RouteStage.STICKY : RouteStage.EXECUTE;
-
-        String reason = buildReason(resolution, intent, reuseSticky, sticky.orElse(null));
+        String reason = (resolution.note() != null ? resolution.note() + "；" : "")
+                + "意图=" + intent.intent() + "(" + intent.confidence() + "/" + intent.layer().code() + ")"
+                + "；没有粘性可用，按意图匹配 Agent";
 
         RoutingDecision decision = new RoutingDecision(
-                stage,
-                intent.intent(),
-                intent.confidence(),
-                intent.layer(),
-                match.agentKey(),
-                match.toolNames(),
-                resolvedText,
-                null,
-                reason);
+                RouteStage.EXECUTE, intent.intent(), intent.confidence(), intent.layer(),
+                match.agentKey(), match.toolNames(), resolution.text(), null, reason);
 
-        afterRoute(request, intent, decision, match.toolNames(), reason, start);
-        return decision;
+        return auditAndReturn(request, decision, start);
     }
 
-    /** ① 身份：账号被停用直接拦下；匿名访问按最小权限 USER 放行。 */
+    /**
+     * 关键词已经给出明确意图时的分支。
+     *
+     * <p>此时不需要任何模型：意图是确定的，只需要判断该不该沿用粘性里的 Agent。
+     * 判据很直接——意图和上一轮一样就继续用，不一样就切。
+     */
+    private RoutingDecision routeByKnownIntent(RoutingRequest request, IntentResult keywordIntent,
+                                               Optional<StickySessionStore.StickySession> sticky,
+                                               String roleKey, long start) {
+        Intent intent = keywordIntent.intent();
+
+        // 转人工 / 投诉：关键词命中即短路，不进 Agent
+        if (intent.isShortCircuit()) {
+            return auditAndReturn(request, shortCircuitFor(keywordIntent), start);
+        }
+
+        boolean sameAsSticky = sticky.isPresent()
+                && intent.name().equals(sticky.get().intent());
+
+        String preferredAgent = sameAsSticky ? sticky.get().agentKey() : null;
+        AgentRegistry.AgentMatch match = matchAgent(intent, roleKey, preferredAgent);
+        if (match == null) {
+            return auditAndReturn(request,
+                    RoutingDecision.shortCircuit(RouteStage.ERROR, intent,
+                            NO_AGENT_REPLY, "Agent 注册表中没有可用 Agent"), start);
+        }
+
+        RouteStage stage = sameAsSticky ? RouteStage.STICKY : RouteStage.EXECUTE;
+        String reason = sameAsSticky
+                ? "关键词命中 " + intent + "，与会话粘性一致，继续沿用 " + match.agentKey()
+                : (sticky.isPresent()
+                        ? "关键词命中 " + intent + "，与粘性话题不同，切换到 " + match.agentKey()
+                        : "关键词命中 " + intent + "，匹配 " + match.agentKey());
+
+        RoutingDecision decision = new RoutingDecision(
+                stage, intent, keywordIntent.confidence(), keywordIntent.layer(),
+                match.agentKey(), match.toolNames(), request.message(), null, reason);
+
+        return auditAndReturn(request, decision, start);
+    }
+
+    /** 短路意图（转人工 / 投诉）对应的决策。 */
+    private RoutingDecision shortCircuitFor(IntentResult intent) {
+        return switch (intent.intent()) {
+            case HANDOFF -> RoutingDecision.shortCircuit(RouteStage.HANDOFF, intent.intent(),
+                    HANDOFF_REPLY, "意图判为转人工");
+            case COMPLAINT -> RoutingDecision.shortCircuit(RouteStage.COMPLAINT, intent.intent(),
+                    COMPLAINT_REPLY, "意图判为投诉");
+            default -> throw new IllegalArgumentException("不是短路意图：" + intent.intent());
+        };
+    }
+
+    /**
+     * 匹配 Agent。preferredAgentKey 非空时优先复用该 Agent（粘性场景），
+     * 但它已被停用/删除时自动退回按意图重新匹配。
+     */
+    private AgentRegistry.AgentMatch matchAgent(Intent intent, String roleKey, String preferredAgentKey) {
+        Optional<AgentRegistry.AgentMatch> preferred = preferredAgentKey == null
+                ? Optional.empty()
+                : agentRegistry.byKey(preferredAgentKey, roleKey);
+
+        return preferred
+                .or(() -> agentRegistry.match(intent, roleKey))
+                .or(() -> agentRegistry.fallback(roleKey))
+                .orElse(null);
+    }
+
+    /**
+     * ① 身份：必须登录后才能使用。未登录、账号不存在、账号被停用，都在这里拦下。
+     *
+     * <p>之所以不像常见客服机器人那样允许游客提问：这个助手能查到设备卖家、会员等
+     * 平台侧数据，也能代用户发起发布，匿名使用既没法做权限控制，也没法把发布落到具体会员头上。
+     */
     private Optional<RoutingDecision> checkIdentity(RoutingRequest request) {
         if (request.aiUserId() == null) {
-            // 客服/导购场景本来就允许游客提问，匿名不是异常
-            return Optional.empty();
+            return Optional.of(RoutingDecision.shortCircuit(RouteStage.IDENTITY, Intent.UNKNOWN,
+                    "请先登录后再使用智能助手。", "未登录"));
         }
         AiUser user = userMapper.selectOne(
                 Wrappers.<AiUser>lambdaQuery().eq(AiUser::getId, request.aiUserId()));
@@ -189,55 +248,21 @@ public class MsgRouter {
         return Optional.empty();
     }
 
-    /**
-     * 是否沿用上一轮的 Agent。
-     *
-     * <p>判据是"本轮分类够不够有把握"：没把握就跟着上一轮走，有把握且换了领域就切。
-     * 注意意图本身也需要与旧 Agent 的能力相容，否则等于把一个查询意图硬塞给不相干的 Agent。
-     */
-    private boolean shouldReuseSticky(IntentResult intent,
-                                      Optional<StickySessionStore.StickySession> sticky) {
-        if (sticky.isEmpty() || sticky.get().agentKey() == null) {
-            return false;
-        }
-        if (intent.intent() == Intent.UNKNOWN) {
-            return true;
-        }
-        if (intent.confidence() >= stickySwitchConfidence) {
-            return false;
-        }
-        return true;
-    }
-
-    private String buildReason(ReferenceResolver.Resolution resolution, IntentResult intent,
-                               boolean reuseSticky, StickySessionStore.StickySession sticky) {
-        StringBuilder sb = new StringBuilder();
-        if (resolution.note() != null) {
-            sb.append(resolution.note()).append("；");
-        }
-        sb.append("意图=").append(intent.intent())
-                .append("(").append(intent.confidence()).append("/").append(intent.layer().code()).append(")")
-                .append("；");
-        if (reuseSticky && sticky != null) {
-            sb.append("沿用会话粘性 Agent=").append(sticky.agentKey());
-        } else if (sticky != null) {
-            sb.append("高置信切换，原粘性 Agent=").append(sticky.agentKey());
-        } else {
-            sb.append("按意图匹配 Agent");
-        }
-        return sb.toString();
-    }
-
-    /** 路由成功后的收尾：写粘性、更新会话、落审计。 */
-    private void afterRoute(RoutingRequest request, IntentResult intent, RoutingDecision decision,
-                            Set<String> toolNames, String reason, long start) {
+    /** 路由收尾：写粘性、更新会话、落审计。 */
+    private RoutingDecision auditAndReturn(RoutingRequest request, RoutingDecision decision, long start) {
         String agentKey = decision.agentKey();
+        Intent intent = decision.intent();
+
         if (agentKey != null) {
-            stickySessionStore.save(request.conversationId(), agentKey, intent.intent());
+            stickySessionStore.save(request.conversationId(), agentKey, intent);
             conversationMemory.touchConversation(request.conversationId(), request.aiUserId(),
-                    request.memberId(), intent.intent().name(), agentKey);
+                    request.memberId(), intent == null ? null : intent.name(), agentKey);
         }
-        auditService.record(request, decision.stage(), intent, agentKey, toolNames, reason, elapsed(start));
+
+        auditService.record(request, decision.stage(), intent, decision.confidence(),
+                decision.classifyLayer(), agentKey, decision.toolNames(), decision.reason(), elapsed(start));
+
+        return decision;
     }
 
     private static int elapsed(long start) {

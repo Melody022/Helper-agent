@@ -7,10 +7,16 @@ import com.jixiejia.agent.classify.IntentClassifier;
 import com.jixiejia.agent.classify.IntentResult;
 import com.jixiejia.agent.classify.KeywordWeightClassifier;
 import com.jixiejia.agent.persistence.entity.ai.AiAuditLog;
+import com.jixiejia.agent.persistence.entity.ai.AiConversation;
+import com.jixiejia.agent.persistence.entity.ai.AiMessage;
 import com.jixiejia.agent.persistence.entity.ai.AiUser;
 import com.jixiejia.agent.persistence.mapper.ai.AiAuditLogMapper;
+import com.jixiejia.agent.persistence.mapper.ai.AiConversationMapper;
+import com.jixiejia.agent.persistence.mapper.ai.AiMessageMapper;
 import com.jixiejia.agent.persistence.mapper.ai.AiUserMapper;
 import com.jixiejia.agent.tool.ToolRegistry;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -26,13 +32,17 @@ import static org.assertj.core.api.Assertions.assertThat;
  *
  * <p>刻意关掉后两层模型与指代消解（见 {@code @SpringBootTest} 的 properties）：
  * 路由链的价值在于"确定性优先"，这条链路的正确性不该依赖某个模型今天心情如何。
- * 带模型的完整链路另见 {@link M4ModelClassifyTest}。
+ * 关掉之后，凡是需要模型才能出结论的场景在测试里都会落 UNKNOWN，
+ * 于是"哪些路径根本没叫模型"就变成了可断言的事实——这正是本阶段最想验证的东西。
+ * 带真实模型的链路另见 {@link com.jixiejia.agent.classify.M4ModelClassifyTest}。
  */
 @SpringBootTest(properties = {
         "routing.model-layers-enabled=false",
         "routing.reference.enabled=false"
 })
 class M4RouterTest {
+
+    private static final String TEST_CONVERSATION_PREFIX = "test-";
 
     @Autowired
     private MsgRouter msgRouter;
@@ -50,20 +60,58 @@ class M4RouterTest {
     private StickySessionStore stickySessionStore;
 
     @Autowired
+    private ReferenceResolver referenceResolver;
+
+    @Autowired
     private ToolRegistry toolRegistry;
 
     @Autowired
     private AiAuditLogMapper auditLogMapper;
 
     @Autowired
+    private AiConversationMapper conversationMapper;
+
+    @Autowired
+    private AiMessageMapper messageMapper;
+
+    @Autowired
     private AiUserMapper aiUserMapper;
 
+    /** 路由要求必须登录，所以每个用例都得有一个真实可用的账号 */
+    private Long testUserId;
+
+    @BeforeEach
+    void createTestUser() {
+        AiUser user = new AiUser();
+        user.setUsername("test_router_" + UUID.randomUUID());
+        user.setPassword("x");
+        user.setStatus("0");
+        user.setDelFlag("0");
+        aiUserMapper.insert(user);
+        testUserId = user.getId();
+    }
+
+    @AfterEach
+    void cleanUp() {
+        if (testUserId != null) {
+            aiUserMapper.deleteById(testUserId);
+            testUserId = null;
+        }
+        // 测试往真实库里写了会话/消息/审计，按 test- 前缀清干净，别污染开发数据
+        auditLogMapper.delete(Wrappers.<AiAuditLog>lambdaQuery()
+                .likeRight(AiAuditLog::getConversationId, TEST_CONVERSATION_PREFIX));
+        messageMapper.delete(Wrappers.<AiMessage>lambdaQuery()
+                .likeRight(AiMessage::getConversationId, TEST_CONVERSATION_PREFIX));
+        conversationMapper.delete(Wrappers.<AiConversation>lambdaQuery()
+                .likeRight(AiConversation::getConversationId, TEST_CONVERSATION_PREFIX));
+    }
+
     private static String newConversationId() {
-        return "test-" + UUID.randomUUID();
+        return TEST_CONVERSATION_PREFIX + UUID.randomUUID();
     }
 
     private RoutingRequest request(String conversationId, String message) {
-        return new RoutingRequest(conversationId, null, null, "USER", message);
+        return new RoutingRequest(conversationId, testUserId, null, "USER", message);
     }
 
     // ---------------- 第 1 层：关键词加权 ----------------
@@ -85,9 +133,8 @@ class M4RouterTest {
     @Test
     @DisplayName("关键词歧义时不下结论，下沉给模型层")
     void ambiguousKeywordsFallThrough() {
-        // "二手设备"指向设备意图，"出租"指向出租意图，两者都是高权重 —— 不能靠枚举顺序硬猜
+        // "二手"指向设备意图，"出租"指向出租意图，两者都是高权重 —— 不能靠枚举顺序硬猜
         assertThat(keywordClassifier.classify("二手设备出租")).isEmpty();
-
         // 但倾向仍然要能取到，供模型层参考
         assertThat(keywordClassifier.hint("二手设备出租")).isPresent();
     }
@@ -98,6 +145,141 @@ class M4RouterTest {
         IntentResult result = intentClassifier.classify("帮我看看那个东西", null);
         assertThat(result.intent()).isEqualTo(Intent.UNKNOWN);
         assertThat(result.layer()).isEqualTo(ClassifyLayer.FALLBACK);
+    }
+
+    // ---------------- 第 1 步：登录门槛 ----------------
+
+    @Test
+    @DisplayName("身份：未登录一律拦下")
+    void anonymousIsBlocked() {
+        RoutingDecision blocked = msgRouter.route(
+                new RoutingRequest(newConversationId(), null, null, "USER", "有没有二手的挖掘机"));
+
+        assertThat(blocked.stage()).isEqualTo(RouteStage.IDENTITY);
+        assertThat(blocked.isShortCircuited()).isTrue();
+        assertThat(blocked.reply()).contains("登录");
+        assertThat(blocked.agentKey()).isNull();
+    }
+
+    @Test
+    @DisplayName("身份：账号不存在 / 已停用都拦下，正常账号放行")
+    void identityCheck() {
+        RoutingDecision missing = msgRouter.route(
+                new RoutingRequest(newConversationId(), 99999999L, null, "USER", "你好"));
+        assertThat(missing.stage()).isEqualTo(RouteStage.IDENTITY);
+        assertThat(missing.reply()).contains("不存在");
+
+        // 已登录的正常账号应当放行并正常路由
+        RoutingDecision ok = msgRouter.route(request(newConversationId(), "有没有二手的挖掘机"));
+        assertThat(ok.stage()).isNotEqualTo(RouteStage.IDENTITY);
+        assertThat(ok.agentKey()).isEqualTo("EquipmentAgent");
+    }
+
+    @Test
+    @DisplayName("身份：停用账号被拦下")
+    void disabledAccountBlocked() {
+        AiUser user = new AiUser();
+        user.setUsername("test_disabled_" + UUID.randomUUID());
+        user.setPassword("x");
+        user.setStatus("1");
+        user.setDelFlag("0");
+        aiUserMapper.insert(user);
+
+        try {
+            RoutingDecision decision = msgRouter.route(
+                    new RoutingRequest(newConversationId(), user.getId(), null, "USER", "你好"));
+            assertThat(decision.stage()).isEqualTo(RouteStage.IDENTITY);
+            assertThat(decision.reply()).contains("停用");
+        } finally {
+            aiUserMapper.deleteById(user.getId());
+        }
+    }
+
+    // ---------------- 第 2 步：系统命令 ----------------
+
+    @Test
+    @DisplayName("/reset 清粘性并短路回复")
+    void resetCommandClearsSticky() {
+        String conversationId = newConversationId();
+
+        RoutingDecision first = msgRouter.route(request(conversationId, "有没有二手的挖掘机"));
+        assertThat(first.agentKey()).isEqualTo("EquipmentAgent");
+        assertThat(stickySessionStore.find(conversationId)).isPresent();
+
+        RoutingDecision reset = msgRouter.route(request(conversationId, "/reset"));
+        assertThat(reset.stage()).isEqualTo(RouteStage.COMMAND);
+        assertThat(reset.isShortCircuited()).isTrue();
+        assertThat(reset.reply()).contains("已重置");
+
+        assertThat(stickySessionStore.find(conversationId)).isEmpty();
+    }
+
+    @Test
+    @DisplayName("已取消 /help：斜杠内容不再被当成命令，交回正常链路")
+    void helpIsNoLongerACommand() {
+        RoutingDecision decision = msgRouter.route(request(newConversationId(), "/help"));
+        assertThat(decision.stage()).isNotEqualTo(RouteStage.COMMAND);
+    }
+
+    // ---------------- 第 3 步：粘性 + 关键词扫描 ----------------
+
+    @Test
+    @DisplayName("粘性：模糊追问靠粘性兜住，且不叫模型")
+    void fuzzyFollowUpReusesStickyWithoutModel() {
+        String conversationId = newConversationId();
+
+        RoutingDecision first = msgRouter.route(request(conversationId, "有没有二手的挖掘机"));
+        assertThat(first.agentKey()).isEqualTo("EquipmentAgent");
+        assertThat(first.stage()).isEqualTo(RouteStage.EXECUTE);
+
+        // "那这个呢"关键词命中不了 → 粘性兜住
+        RoutingDecision followUp = msgRouter.route(request(conversationId, "那这个呢"));
+        assertThat(followUp.stage()).isEqualTo(RouteStage.STICKY);
+        assertThat(followUp.agentKey()).isEqualTo("EquipmentAgent");
+
+        // 关键：这条路径没有经过任何模型层（classifyLayer 为空即为证据）
+        assertThat(followUp.classifyLayer()).isNull();
+        assertThat(followUp.reason()).contains("粘性");
+    }
+
+    @Test
+    @DisplayName("粘性：关键词命中同一话题时继续沿用，也不叫模型")
+    void sameTopicKeywordKeepsSticky() {
+        String conversationId = newConversationId();
+
+        msgRouter.route(request(conversationId, "有没有二手的挖掘机"));
+
+        RoutingDecision second = msgRouter.route(request(conversationId, "有二手装载机吗"));
+        assertThat(second.stage()).isEqualTo(RouteStage.STICKY);
+        assertThat(second.agentKey()).isEqualTo("EquipmentAgent");
+        // 关键词层已经定案，同样没走模型
+        assertThat(second.classifyLayer()).isEqualTo(ClassifyLayer.KEYWORD);
+        assertThat(second.reason()).contains("与会话粘性一致");
+    }
+
+    @Test
+    @DisplayName("粘性：关键词命中不同话题时立刻切换 Agent")
+    void differentTopicSwitchesAgent() {
+        String conversationId = newConversationId();
+
+        msgRouter.route(request(conversationId, "有没有二手的挖掘机"));
+
+        // 关键词高置信指向别的领域 → 切走，不被粘性拽住
+        RoutingDecision switched = msgRouter.route(request(conversationId, "我想求租"));
+        assertThat(switched.stage()).isEqualTo(RouteStage.EXECUTE);
+        assertThat(switched.agentKey()).isEqualTo("RentalAgent");
+        assertThat(switched.reason()).contains("切换到");
+    }
+
+    @Test
+    @DisplayName("粘性：没有粘性且关键词未命中时，才真正走模型")
+    void fallsBackToModelWhenNothingHelps() {
+        String conversationId = newConversationId();
+
+        // 全新会话 + 关键词命中不到 → 必须走分类（测试里模型层关着，故落 UNKNOWN → 兜底 Agent）
+        RoutingDecision decision = msgRouter.route(request(conversationId, "帮我看看那个东西"));
+        assertThat(decision.agentKey()).isEqualTo("GeneralAgent");
+        assertThat(decision.intent()).isEqualTo(Intent.UNKNOWN);
     }
 
     // ---------------- 第 6 步：Agent 匹配 ----------------
@@ -118,7 +300,6 @@ class M4RouterTest {
         assertThat(agentRegistry.match(Intent.PUBLISH_CHUZU, "USER").orElseThrow().agentKey())
                 .isEqualTo("PublishAgent");
 
-        // UNKNOWN 没有任何能力需求，匹配不到具体 Agent，落到兜底
         AgentRegistry.AgentMatch fallback = agentRegistry.match(Intent.UNKNOWN, "USER").orElseThrow();
         assertThat(fallback.agentKey()).isEqualTo("GeneralAgent");
         assertThat(fallback.fallback()).isTrue();
@@ -127,7 +308,6 @@ class M4RouterTest {
     @Test
     @DisplayName("Agent 只能拿到自己能力范围内的工具")
     void agentToolsAreScopedByCapability() {
-        // EquipmentAgent 声明的能力只有 equipment，不该拿到出租/资讯工具
         AgentRegistry.AgentMatch equipment = agentRegistry.match(Intent.EQUIPMENT_QUERY, "USER").orElseThrow();
         assertThat(equipment.toolNames())
                 .containsExactlyInAnyOrder("search_equipment", "get_equipment_detail");
@@ -136,7 +316,6 @@ class M4RouterTest {
         assertThat(rental.toolNames())
                 .containsExactlyInAnyOrder("search_chuzu", "search_qiuzu", "search_demand", "search_xunjia");
 
-        // 兜底 Agent 不声明能力，因此一个工具都不该有
         assertThat(agentRegistry.fallback("USER").orElseThrow().toolNames()).isEmpty();
     }
 
@@ -152,98 +331,8 @@ class M4RouterTest {
         assertThat(adminTools).containsAll(forAdmin.toolNames());
         assertThat(userTools).containsAll(forUser.toolNames());
 
-        // 不存在的角色拿不到任何工具
         assertThat(agentRegistry.match(Intent.EQUIPMENT_QUERY, "NO_SUCH_ROLE")
                 .orElseThrow().toolNames()).isEmpty();
-    }
-
-    // ---------------- 第 2 步：系统命令 ----------------
-
-    @Test
-    @DisplayName("/reset 清粘性并短路回复")
-    void resetCommandClearsSticky() {
-        String conversationId = newConversationId();
-
-        // 先建立粘性
-        RoutingDecision first = msgRouter.route(request(conversationId, "有没有二手的挖掘机"));
-        assertThat(first.agentKey()).isEqualTo("EquipmentAgent");
-        assertThat(stickySessionStore.find(conversationId)).isPresent();
-
-        // /reset 命中命令并短路
-        RoutingDecision reset = msgRouter.route(request(conversationId, "/reset"));
-        assertThat(reset.stage()).isEqualTo(RouteStage.COMMAND);
-        assertThat(reset.isShortCircuited()).isTrue();
-        assertThat(reset.reply()).contains("已重置");
-
-        // 粘性被清掉
-        assertThat(stickySessionStore.find(conversationId)).isEmpty();
-    }
-
-    @Test
-    @DisplayName("/help 给出能力清单")
-    void helpCommand() {
-        RoutingDecision decision = msgRouter.route(request(newConversationId(), "/help"));
-        assertThat(decision.stage()).isEqualTo(RouteStage.COMMAND);
-        assertThat(decision.reply()).contains("找设备");
-    }
-
-    // ---------------- 第 1 步：身份 ----------------
-
-    @Test
-    @DisplayName("身份：不存在的账号被拦下，匿名访问放行")
-    void identityCheck() {
-        RoutingDecision blocked = msgRouter.route(
-                new RoutingRequest(newConversationId(), 99999999L, null, "USER", "你好"));
-        assertThat(blocked.stage()).isEqualTo(RouteStage.IDENTITY);
-        assertThat(blocked.isShortCircuited()).isTrue();
-
-        // 匿名（aiUserId 为 null）是客服场景的正常情况，应当放行
-        RoutingDecision anonymous = msgRouter.route(request(newConversationId(), "有没有二手的挖掘机"));
-        assertThat(anonymous.stage()).isNotEqualTo(RouteStage.IDENTITY);
-        assertThat(anonymous.agentKey()).isEqualTo("EquipmentAgent");
-    }
-
-    @Test
-    @DisplayName("身份：停用账号被拦下")
-    void disabledAccountBlocked() {
-        String username = "test_disabled_" + UUID.randomUUID();
-        AiUser user = new AiUser();
-        user.setUsername(username);
-        user.setPassword("x");
-        user.setStatus("1");
-        user.setDelFlag("0");
-        aiUserMapper.insert(user);
-
-        try {
-            RoutingDecision decision = msgRouter.route(
-                    new RoutingRequest(newConversationId(), user.getId(), null, "USER", "你好"));
-            assertThat(decision.stage()).isEqualTo(RouteStage.IDENTITY);
-            assertThat(decision.reply()).contains("停用");
-        } finally {
-            aiUserMapper.deleteById(user.getId());
-        }
-    }
-
-    // ---------------- 第 3 步：会话粘性 ----------------
-
-    @Test
-    @DisplayName("粘性：分类没把握时沿用上一轮 Agent，高置信换领域时切换")
-    void stickySessionReuseAndSwitch() {
-        String conversationId = newConversationId();
-
-        RoutingDecision first = msgRouter.route(request(conversationId, "有没有二手的挖掘机"));
-        assertThat(first.agentKey()).isEqualTo("EquipmentAgent");
-        assertThat(first.stage()).isEqualTo(RouteStage.EXECUTE);
-
-        // 关键词命中不了的追问 → UNKNOWN → 沿用上一轮的 EquipmentAgent
-        RoutingDecision followUp = msgRouter.route(request(conversationId, "那这个呢"));
-        assertThat(followUp.stage()).isEqualTo(RouteStage.STICKY);
-        assertThat(followUp.agentKey()).isEqualTo("EquipmentAgent");
-
-        // 高置信指向别的领域 → 切换
-        RoutingDecision switched = msgRouter.route(request(conversationId, "我想求租"));
-        assertThat(switched.stage()).isEqualTo(RouteStage.EXECUTE);
-        assertThat(switched.agentKey()).isEqualTo("RentalAgent");
     }
 
     // ---------------- 短路：转人工 / 投诉 ----------------
@@ -264,6 +353,34 @@ class M4RouterTest {
     }
 
     // ---------------- 第 7 步：审计 ----------------
+
+    @Test
+    @DisplayName("指代消解只认真正的指代词，追问词归粘性管")
+    void onlyRealAnaphoraTriggerResolution() {
+        // 这些字面说不清指谁，必须回指上文
+        assertThat(referenceResolver.needsResolution("这个多少钱")).isTrue();
+        assertThat(referenceResolver.needsResolution("那台还在吗")).isTrue();
+        assertThat(referenceResolver.needsResolution("它多少钱")).isTrue();
+
+        // 这些是追问，字面意思已完整，该由粘性兜住而不是每轮白跑一次模型
+        assertThat(referenceResolver.needsResolution("还有吗")).isFalse();
+        assertThat(referenceResolver.needsResolution("有没有便宜点的")).isFalse();
+        assertThat(referenceResolver.needsResolution("换一个看看")).isFalse();
+        assertThat(referenceResolver.needsResolution("别的呢")).isFalse();
+    }
+
+    @Test
+    @DisplayName("粘性：同一个 Agent 的模糊追问仍复用，但粘性 Agent 下线时退回重新匹配")
+    void stickyFallsBackWhenAgentGone() {
+        String conversationId = newConversationId();
+
+        // 手工塞一条指向不存在 Agent 的粘性记录，模拟 Agent 被停用/删除后的残留
+        stickySessionStore.save(conversationId, "NoSuchAgent", Intent.EQUIPMENT_QUERY);
+
+        RoutingDecision decision = msgRouter.route(request(conversationId, "那这个呢"));
+        // 不能把消息硬塞给一个已下线的 Agent，必须重新走到匹配逻辑
+        assertThat(decision.agentKey()).isNotNull().isNotEqualTo("NoSuchAgent");
+    }
 
     @Test
     @DisplayName("审计：每次路由都落一条，含命中的步骤与分类层")
@@ -297,5 +414,19 @@ class M4RouterTest {
         assertThat(rows).hasSize(1);
         assertThat(rows.get(0).getRouteStage()).isEqualTo(RouteStage.COMPLAINT.code());
         assertThat(rows.get(0).getAgentKey()).isNull();
+    }
+
+    @Test
+    @DisplayName("审计：未登录也被记录，便于排查")
+    void auditRecordsIdentityBlock() {
+        String conversationId = newConversationId();
+        msgRouter.route(new RoutingRequest(conversationId, null, null, "USER", "你好"));
+
+        var rows = auditLogMapper.selectList(Wrappers.<AiAuditLog>lambdaQuery()
+                .eq(AiAuditLog::getConversationId, conversationId));
+
+        assertThat(rows).hasSize(1);
+        assertThat(rows.get(0).getRouteStage()).isEqualTo(RouteStage.IDENTITY.code());
+        assertThat(rows.get(0).getUserId()).isNull();
     }
 }

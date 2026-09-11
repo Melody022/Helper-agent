@@ -113,12 +113,13 @@ ai-session:
 routing:
   enabled: ${AI_INTENT_ROUTING_ENABLED:true}
 
-  # 会话粘性：未过期时倾向复用上一轮 Agent
+  # 会话粘性：模糊追问沿用上一轮 Agent，避免每轮重新分类
   sticky:
     enabled: true
     ttl-minutes: ${AI_STICKY_TTL_MINUTES:30}
-    # 意图置信度达到该值且指向别的领域时才切换 Agent；低于它则沿用上一轮，保证对话连贯
-    switch-confidence: 0.7
+    # 注：这里刻意没有"切换置信度阈值"这类开关。
+    # 换不换话题由第 1 层关键词扫描决定（命中不同意图即切换，见 KeywordWeightClassifier），
+    # 阈值就是 routing.keyword.high-weight，再设一个数值只会变成两个真相来源。
 
   # 第 1 层关键词加权分类
   keyword:
