@@ -54,16 +54,17 @@ public abstract class AbstractReactAgent implements BizAgent {
     }
 
     @Override
-    public String reply(String userText, List<Message> history, List<ToolCallback> tools) {
+    public String reply(AgentContext context) {
         try {
+            List<ToolCallback> tools = context.tools();
             CompiledGraph<MessagesState<Message>> graph = graphCache.computeIfAbsent(
                     cacheKey(tools), key -> compile(tools));
 
             List<Message> messages = new ArrayList<>();
-            if (history != null) {
-                messages.addAll(history);
+            if (context.history() != null) {
+                messages.addAll(context.history());
             }
-            messages.add(new UserMessage(userText));
+            messages.add(new UserMessage(context.userText()));
 
             return graph.invoke(Map.of(MessagesState.MESSAGES_STATE, messages))
                     .map(AbstractReactAgent::lastAssistantText)

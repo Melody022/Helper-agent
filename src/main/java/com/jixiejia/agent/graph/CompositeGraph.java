@@ -1,5 +1,6 @@
 package com.jixiejia.agent.graph;
 
+import com.jixiejia.agent.agent.AgentContext;
 import com.jixiejia.agent.agent.AgentExecutor;
 import com.jixiejia.agent.llm.LlmClients;
 import com.jixiejia.agent.llm.ModelCaller;
@@ -209,8 +210,12 @@ public class CompositeGraph {
             }
 
             ToolCallback[] tools = toolRegistry.callbacksFor(match.toolNames());
+            // 跨域分支里没有会话上下文：发布是确定性工作流、不参与跨域，
+            // 其余 Agent 都是无状态的，不需要 conversationId
             String answer = agentExecutor
-                    .execute(agentKey, state.message(), List.of(), List.of(tools))
+                    .execute(agentKey, new AgentContext(
+                            null, null, null, state.role(),
+                            state.message(), List.of(), List.of(tools)))
                     .orElse("");
 
             if (answer.isBlank()) {

@@ -1,5 +1,6 @@
 package com.jixiejia.agent.chat;
 
+import com.jixiejia.agent.agent.AgentContext;
 import com.jixiejia.agent.agent.AgentExecutor;
 import com.jixiejia.agent.classify.Intent;
 import com.jixiejia.agent.graph.CompositeGraph;
@@ -143,7 +144,9 @@ public class ChatService {
         } else {
             ToolCallback[] tools = toolRegistry.callbacksFor(decision.toolNames());
             answer = agentExecutor
-                    .execute(decision.agentKey(), decision.resolvedText(), history, List.of(tools))
+                    .execute(decision.agentKey(), new AgentContext(
+                            convId, userId, memberId, roleKey,
+                            decision.resolvedText(), history, List.of(tools)))
                     .orElseGet(() -> {
                         log.warn("路由选中了 Agent {}，但代码中没有对应实现", decision.agentKey());
                         return AGENT_MISSING_REPLY;

@@ -92,14 +92,24 @@ class M5AgentTest {
     }
 
     @Test
-    @DisplayName("装配：发布 Agent 在功能上线前只回固定话术，不调模型")
-    void publishAgentReturnsFixedScript() {
+    @DisplayName("装配：发布 Agent 会真的开始走填表流程，而不是回一句占位话术")
+    void publishAgentStartsFormWorkflow() {
         BizAgent publish = agentExecutor.find("PublishAgent").orElseThrow();
-        String answer = publish.reply("帮我发布一台出租", List.of(), List.of());
 
-        assertThat(answer).contains("开发中");
-        // 必须让用户知道"还没提交"，不能给已经发布的错觉
-        assertThat(answer).contains("确认");
+        // 发布要落库，必须带上真实身份与会话（完整流程见 M7PublishTest）
+        String conversationId = "test-agent-pub-" + UUID.randomUUID();
+        String answer = publish.reply(new AgentContext(
+                conversationId, createUser(), null, "USER",
+                "帮我发布一台出租", List.of(), List.of()));
+
+        System.out.println("[发布流程首轮]\n" + answer);
+
+        assertThat(answer).isNotBlank();
+        // 只说了"发布出租"、没说具体信息，应当追问必填项而不是直接回一句"开发中"
+        assertThat(answer).contains("还需要你补充");
+        assertThat(answer).contains("机型").contains("联系电话");
+
+        jdbcTemplate.update("DELETE FROM ai_publish_request WHERE conversation_id = ?", conversationId);
     }
 
     @Test
@@ -127,7 +137,7 @@ class M5AgentTest {
         assertThat(tools).isNotEmpty();
 
         String answer = agentExecutor
-                .execute(decision.agentKey(), decision.resolvedText(), List.of(), List.of(tools))
+                .execute(decision.agentKey(), AgentContext.of(decision.resolvedText(), List.of(tools)))
                 .orElseThrow();
 
         System.out.println("[设备查询回答]\n" + answer);
@@ -150,7 +160,7 @@ class M5AgentTest {
 
         ToolCallback[] tools = toolRegistry.callbacksFor(decision.toolNames());
         String answer = agentExecutor
-                .execute(decision.agentKey(), decision.resolvedText(), List.of(), List.of(tools))
+                .execute(decision.agentKey(), AgentContext.of(decision.resolvedText(), List.of(tools)))
                 .orElseThrow();
 
         System.out.println("[平台规则回答]\n" + answer);

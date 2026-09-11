@@ -51,8 +51,7 @@ public class AgentExecutor {
      * <p>agentKey 在注册表里存在但代码里没有对应实现时（比如库里配了、代码删了），
      * 返回 empty 交给上层兜底，而不是抛异常。
      */
-    public Optional<String> execute(String agentKey, String userText,
-                                    List<Message> history, List<ToolCallback> tools) {
-        return find(agentKey).map(agent -> agent.reply(userText, history, tools));
+    public Optional<String> execute(String agentKey, AgentContext context) {
+        return find(agentKey).map(agent -> agent.reply(context));
     }
 }

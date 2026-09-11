@@ -222,6 +222,36 @@ public class RegionService {
         return provinceId != null && chain.contains(provinceId);
     }
 
+    /**
+     * 自底向上找出所属的省级区划。
+     *
+     * <p>用途：用户往往只说城市名（"洛阳"），但业务表 province_id 和 city_id 都要填。
+     * 只填 city_id 的话，这条数据在按省筛选时就查不到——用户觉得"发了却没出现"，
+     * 很难查到原因。
+     *
+     * @return 找不到时返回 null
+     */
+    public Long provinceIdOf(Long regionId) {
+        return ancestorOfLevel(regionId, LEVEL_PROVINCE);
+    }
+
+    /** 自底向上找出所属的市级区划。 */
+    public Long cityIdOf(Long regionId) {
+        return ancestorOfLevel(regionId, LEVEL_CITY);
+    }
+
+    private Long ancestorOfLevel(Long regionId, int level) {
+        BizBaseRegion cur = regionId == null ? null : byId.get(regionId);
+        int guard = 0;
+        while (cur != null && guard++ < 5) {
+            if (cur.getLevel() != null && cur.getLevel() == level) {
+                return cur.getId();
+            }
+            cur = cur.getParentId() == null ? null : byId.get(cur.getParentId());
+        }
+        return null;
+    }
+
     /** 自底向上回溯出区划链（区县→市→省）。 */
     public Set<Long> provinceChain(Long regionId) {
         Set<Long> chain = new java.util.LinkedHashSet<>();
