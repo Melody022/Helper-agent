@@ -55,14 +55,29 @@ public class KnowledgeAnswerService {
             5. 不要输出 JSON 或字段名。
             """;
 
+    /**
+     * 自评提示词。
+     *
+     * <p>措辞踩过一次坑：原来写的是"如果回答里出现了资料中没有的具体数字、比例、时限，
+     * 判为否"——本意是让它核对数字，实际效果却是暗示它"看到数字就判否"。
+     * 实测中一个完全正确、数字全部来自资料的回答被误判成不合格，
+     * 用户明明能得到答案，却被告知"资料不足，请转人工"。
+     *
+     * <p>改成"逐条核对 + 给正例"，让它先去找依据，而不是先怀疑。
+     */
     private static final String SELF_EVAL_SYSTEM = """
-            你在校对一段客服回答。
+            你在核对一段客服回答是否忠于给定资料。
 
-            下面给你【资料】和基于资料写出的【回答】。
-            请判断：回答里的信息是否**全部**能在资料中找到依据？
+            下面会给你【资料】和基于资料写出的【回答】。
+            请逐条核对回答里的具体信息——尤其是数字、比例、金额、时限、条款——
+            是否都能在资料里找到出处。
 
-            只输出一个字：是 或 否。
-            如果回答里出现了资料中没有的具体数字、比例、时限、条款，判为"否"。
+            判断标准：
+            - 每一条信息都能在资料里找到依据 → 输出：是
+            - 有任何一条在资料里找不到，或者与资料矛盾 → 输出：否
+
+            资料里有数字而回答也用了同样的数字，算「有依据」，判「是」。
+            只输出一个字：是 或 否。不要解释。
             """;
 
     private final KnowledgeRetriever retriever;
@@ -103,34 +118,47 @@ public class KnowledgeAnswerService {
         List<KnowledgeRetriever.Hit> hits = retriever.retrieve(question, topK);
 
         // ② 证据闸：资料不够就不生成
-        EvidenceGate.Verdict verdict = evidenceGate.evaluate(hits, gateEnabled);
-        if (!verdict.passed()) {
-            log.info("证据闸拦下：{}（{}）", question, verdict.reason());
+        EvidenceGate.Verdict gate = evidenceGate.evaluate(hits, gateEnabled);
+        if (!gate.passed()) {
+            log.info("证据闸拦下：{}（{}）", question, gate.reason());
             flywheelService.record(FlywheelService.SOURCE_WEAK_EVIDENCE,
-                    conversationId, question, null, verdict.topScore());
-            return new Answer(false, NOT_ENOUGH_REPLY, verdict.topScore(),
-                    verdict.evidenceCount(), verdict.reason());
+                    conversationId, question, null, gate.topScore());
+            return new Answer(false, NOT_ENOUGH_REPLY, gate.topScore(),
+                    gate.evidenceCount(), gate.reason());
         }
 
         // ③ 生成
         String answer = generate(question, hits);
         if (answer == null || answer.isBlank()) {
             flywheelService.record(FlywheelService.SOURCE_WEAK_EVIDENCE,
-                    conversationId, question, null, verdict.topScore());
-            return new Answer(false, NOT_ENOUGH_REPLY, verdict.topScore(),
-                    verdict.evidenceCount(), "生成回答失败");
+                    conversationId, question, null, gate.topScore());
+            return new Answer(false, NOT_ENOUGH_REPLY, gate.topScore(),
+                    gate.evidenceCount(), "生成回答失败");
         }
 
         // ④ 自评：答案有没有超出资料
-        if (selfEvalEnabled && !selfEvaluate(question, hits, answer)) {
-            log.info("自评未通过，改走兜底：{}", question);
-            flywheelService.record(FlywheelService.SOURCE_SELF_EVAL_FAIL,
-                    conversationId, question, answer, verdict.topScore());
-            return new Answer(false, SELF_EVAL_FAIL_REPLY, verdict.topScore(),
-                    verdict.evidenceCount(), "自评未通过：答案可能超出资料");
+        if (selfEvalEnabled) {
+            String selfVerdict = selfEvaluate(question, hits, answer);
+            if (!"是".equals(selfVerdict)) {
+                // 把模型的原始判定打出来。自评误杀是最难发现的一类问题——
+                // 明明能答的问题被拒答，从用户侧看就是"这个机器人什么都不会"，
+                // 而日志里只会留下"自评未通过"，看不出模型到底说了什么。
+                log.info("自评未通过（模型判定：{}），改走兜底：{}", abbreviate(selfVerdict), question);
+                flywheelService.record(FlywheelService.SOURCE_SELF_EVAL_FAIL,
+                        conversationId, question, answer, gate.topScore());
+                return new Answer(false, SELF_EVAL_FAIL_REPLY, gate.topScore(),
+                        gate.evidenceCount(), "自评未通过：答案可能超出资料");
+            }
         }
 
-        return new Answer(true, answer, verdict.topScore(), verdict.evidenceCount(), verdict.reason());
+        return new Answer(true, answer, gate.topScore(), gate.evidenceCount(), gate.reason());
+    }
+
+    private static String abbreviate(String s) {
+        if (s == null) {
+            return "null";
+        }
+        return s.length() <= 60 ? s : s.substring(0, 60) + "…";
     }
 
     /** 把资料拼进提示词生成回答。 */
@@ -154,7 +182,7 @@ public class KnowledgeAnswerService {
      * <p>用本地小模型。判不出来（模型不可用/返回看不懂）时**按通过处理**——
      * 自评是第二道保险，不该因为本地模型没启动就把正常问答全拒掉。
      */
-    private boolean selfEvaluate(String question, List<KnowledgeRetriever.Hit> hits, String answer) {
+    private String selfEvaluate(String question, List<KnowledgeRetriever.Hit> hits, String answer) {
         StringBuilder sources = new StringBuilder();
         for (KnowledgeRetriever.Hit hit : hits) {
             sources.append(hit.content()).append("\n");
@@ -163,13 +191,12 @@ public class KnowledgeAnswerService {
 
         String verdict = modelCaller.call(clients.small(), SELF_EVAL_SYSTEM, user, selfEvalTimeoutMs);
         if (verdict == null || verdict.isBlank()) {
+            // 自评是第二道保险，不该因为本地模型没启动就把正常问答全拒掉
             log.debug("自评模型不可用，默认放行");
-            return true;
+            return "是";
         }
-        String normalized = verdict.trim();
-        if (normalized.contains("否")) {
-            return false;
-        }
-        return true;
+        // 只认第一个字：模型偶尔会多吐一句解释，取首个"是/否"即可
+        String cleaned = verdict.replace("\n", "").replace("\r", "").trim();
+        return cleaned.startsWith("否") ? "否" : "是";
     }
 }

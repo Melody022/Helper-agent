@@ -14,8 +14,13 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.embedding.EmbeddingModel;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.core.io.Resource;
+import org.springframework.core.io.ResourceLoader;
 import org.springframework.stereotype.Service;
 
+import java.io.BufferedReader;
+import java.io.InputStreamReader;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -43,6 +48,9 @@ public class KnowledgeIngestionService {
     /** 每批算多少个切片的向量。太大容易触发接口的批量上限，太小浪费往返。 */
     private static final int EMBED_BATCH = 16;
 
+    /** 内置平台规则语料的位置 */
+    private static final String BUILTIN_FAQ_PATH = "classpath:knowledge/platform-faq.md";
+
     private final CmsArticleMapper articleMapper;
     private final AiKnowledgeDocMapper docMapper;
     private final AiKnowledgeChunkMapper chunkMapper;
@@ -50,6 +58,7 @@ public class KnowledgeIngestionService {
     private final EmbeddingModel embeddingModel;
     private final ElasticsearchClient es;
     private final KnowledgeIndex knowledgeIndex;
+    private final ResourceLoader resourceLoader;
 
     @Value("${rag.embedding-model:text-embedding-v4}")
     private String embeddingModelName;
@@ -212,6 +221,95 @@ public class KnowledgeIngestionService {
                 .index(KnowledgeIndex.NAME)
                 .id(row.getVectorId())
                 .document(esDoc));
+    }
+
+    /**
+     * 把内置的平台规则语料灌进知识库。
+     *
+     * <p>语料放在 {@code classpath:knowledge/platform-faq.md}，按 {@code ## 标题} 切分，
+     * 一条规则 = 一个知识文档。之所以用文件而不是直接写数据库脚本：
+     * 入库要做切片、算向量、建索引，这些只有入库服务会做；
+     * 而且文件方式可以随时改了重新灌，内容变了会被指纹识别出来重建。
+     */
+    public IngestionReport ingestBuiltinFaq() {
+        if (!knowledgeIndex.available()) {
+            return new IngestionReport(0, 0, 0, 0, List.of("Elasticsearch 不可用，未执行入库"));
+        }
+
+        List<KnowledgeSeed> seeds = loadBuiltinFaq();
+        int ingested = 0;
+        int skipped = 0;
+        int totalChunks = 0;
+        List<String> failures = new ArrayList<>();
+
+        for (KnowledgeSeed seed : seeds) {
+            try {
+                AiKnowledgeDoc doc = upsertDoc("faq", seed.sourceId(), seed.title(), seed.content());
+                if (doc == null) {
+                    skipped++;
+                } else {
+                    ingested++;
+                    totalChunks += indexDocument(doc, seed.content());
+                }
+            } catch (Exception e) {
+                log.warn("内置规则「{}」入库失败", seed.title(), e);
+                failures.add(seed.title() + "：" + e.getMessage());
+            }
+        }
+
+        log.info("内置规则入库完成：新增 {} 条，跳过 {} 条，共 {} 个切片", ingested, skipped, totalChunks);
+        return new IngestionReport(seeds.size(), ingested, skipped, totalChunks, failures);
+    }
+
+    /** 一条待入库的语料。 */
+    private record KnowledgeSeed(String sourceId, String title, String content) {
+    }
+
+    /** 解析内置语料文件：按 {@code ## 标题} 切块，标题下的正文归该条。 */
+    private List<KnowledgeSeed> loadBuiltinFaq() {
+        Resource resource = resourceLoader.getResource(BUILTIN_FAQ_PATH);
+        if (!resource.exists()) {
+            log.warn("内置规则文件不存在：{}", BUILTIN_FAQ_PATH);
+            return List.of();
+        }
+
+        List<KnowledgeSeed> seeds = new ArrayList<>();
+        try (BufferedReader reader = new BufferedReader(
+                new InputStreamReader(resource.getInputStream(), StandardCharsets.UTF_8))) {
+
+            String currentTitle = null;
+            StringBuilder body = new StringBuilder();
+            String line;
+
+            while ((line = reader.readLine()) != null) {
+                if (line.startsWith("## ")) {
+                    addSeed(seeds, currentTitle, body);
+                    currentTitle = line.substring(3).trim();
+                    body.setLength(0);
+                } else if (currentTitle != null) {
+                    body.append(line).append('\n');
+                }
+                // 第一个标题之前的内容是文件说明，忽略
+            }
+            addSeed(seeds, currentTitle, body);
+
+        } catch (Exception e) {
+            log.error("读取内置规则文件失败", e);
+            return List.of();
+        }
+        return seeds;
+    }
+
+    private void addSeed(List<KnowledgeSeed> seeds, String title, StringBuilder body) {
+        if (title == null || title.isBlank()) {
+            return;
+        }
+        String content = body.toString().trim();
+        if (content.isBlank()) {
+            return;
+        }
+        // sourceId 用序号：稳定、可重复执行，改了正文也不会插出重复条目
+        seeds.add(new KnowledgeSeed("builtin-" + (seeds.size() + 1), title, content));
     }
 
     /** 删掉某文档的所有切片，MySQL 与 ES 两边都清，避免留下查得到但已失效的旧内容。 */

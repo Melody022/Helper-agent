@@ -47,16 +47,26 @@ public class AdminKnowledgeController {
     private final AiFlywheelCandidateMapper flywheelMapper;
     private final AiKnowledgeDocMapper docMapper;
 
-    @Operation(summary = "触发知识入库", description = "把平台已发布文章增量灌入知识库，可反复执行")
+    @Operation(summary = "触发知识入库",
+            description = "把平台已发布文章与内置规则语料增量灌入知识库，可反复执行")
     @PostMapping("/ingest")
     public ResponseEntity<?> ingest() {
-        KnowledgeIngestionService.IngestionReport report = ingestionService.ingestArticles();
+        KnowledgeIngestionService.IngestionReport articles = ingestionService.ingestArticles();
+        KnowledgeIngestionService.IngestionReport faq = ingestionService.ingestBuiltinFaq();
+
         return ResponseEntity.ok(Map.of(
-                "scanned", report.scanned(),
-                "ingested", report.ingested(),
-                "skipped", report.skipped(),
-                "chunks", report.chunks(),
-                "failures", report.failures()));
+                "articles", Map.of(
+                        "scanned", articles.scanned(),
+                        "ingested", articles.ingested(),
+                        "skipped", articles.skipped(),
+                        "chunks", articles.chunks(),
+                        "failures", articles.failures()),
+                "builtinFaq", Map.of(
+                        "scanned", faq.scanned(),
+                        "ingested", faq.ingested(),
+                        "skipped", faq.skipped(),
+                        "chunks", faq.chunks(),
+                        "failures", faq.failures())));
     }
 
     @Operation(summary = "知识库概况", description = "文档数、切片数、ES 是否可用")

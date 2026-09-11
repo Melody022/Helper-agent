@@ -14,6 +14,7 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.jdbc.core.JdbcTemplate;
 
 import java.util.List;
 import java.util.UUID;
@@ -66,6 +67,9 @@ class M6KnowledgeTest {
     @Autowired
     private ElasticsearchClient es;
 
+    @Autowired
+    private JdbcTemplate jdbcTemplate;
+
     private String testSourceId;
 
     @BeforeEach
@@ -76,7 +80,7 @@ class M6KnowledgeTest {
     @AfterEach
     void cleanUp() throws Exception {
         // 测试会往 MySQL 与 ES 两边写，两边都要清，否则知识库里会积攒测试数据、
-        // 甚至影响后续检索结果
+        // 甚至影响后续检索结果。
         List<AiKnowledgeDoc> docs = docMapper.selectList(Wrappers.<AiKnowledgeDoc>lambdaQuery()
                 .likeRight(AiKnowledgeDoc::getSourceId, TEST_SOURCE_PREFIX));
         for (AiKnowledgeDoc doc : docs) {
@@ -86,8 +90,14 @@ class M6KnowledgeTest {
                 es.deleteByQuery(d -> d.index(KnowledgeIndex.NAME)
                         .query(q -> q.term(t -> t.field(KnowledgeIndex.fieldDocId()).value(doc.getId()))));
             }
-            docMapper.deleteById(doc.getId());
         }
+        // 这里必须物理删除。用 docMapper.deleteById 走的是 @TableLogic 逻辑删除，
+        // 只把 del_flag 置成 '2'，行还留在表里；而上面的 selectList 会自动过滤掉它们，
+        // 于是下一轮清理根本看不见这些残行——越积越多，还会污染检索结果。
+        // （ai_user 那边踩过一模一样的坑，这里忘了改。）
+        jdbcTemplate.update("DELETE FROM ai_knowledge_doc WHERE LEFT(source_id, 5) = 'test-'");
+        jdbcTemplate.update("DELETE FROM ai_knowledge_chunk WHERE doc_id NOT IN (SELECT id FROM ai_knowledge_doc)");
+
         flywheelMapper.delete(Wrappers.<AiFlywheelCandidate>lambdaQuery()
                 .likeRight(AiFlywheelCandidate::getQuestion, "[测试]"));
     }
@@ -219,6 +229,30 @@ class M6KnowledgeTest {
 
         assertThat(answer.text()).isNotBlank();
         assertThat(answer.topScore()).isPositive();
+    }
+
+    @Test
+    @DisplayName("真跑：内置规则语料能回答被覆盖的问题，且答案来自语料")
+    void builtinFaqIsAnswerable() throws Exception {
+        Assumptions.assumeTrue(knowledgeIndex.available(), "Elasticsearch 未启动，跳过");
+
+        // 内置语料是随应用发布的正式内容，不是测试数据，这里显式灌一遍保证存在
+        ingestionService.ingestBuiltinFaq();
+        Thread.sleep(1200);
+
+        // 用一个语料里明确写了的问题。注意问法用"手续费"，语料里写的是"服务费"——
+        // 这是刻意的：纯关键词检索匹配不上，只有向量召回能跨过这个同义词差异，
+        // 正好验证混合召回的必要性
+        KnowledgeAnswerService.Answer answer = answerService.answer("平台收多少手续费", "test-conv");
+
+        System.out.println("[内置规则回答]\n" + answer.text());
+
+        assertThat(answer.answered())
+                .as("语料里有答案的问题不该被自评误杀")
+                .isTrue();
+        assertThat(answer.text())
+                .as("答案应当来自语料里的费率，而不是模型自己编的")
+                .contains("3%").contains("5%");
     }
 
     @Test
