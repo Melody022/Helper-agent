@@ -56,6 +56,9 @@ public class ReferenceResolver {
     private final LlmClients clients;
     private final ModelCaller modelCaller;
 
+    /** 改写超时。本地小模型首次调用要加载模型，给足余量 */
+    private static final long TIMEOUT_MS = 30_000L;
+
     @Value("${routing.reference.enabled:true}")
     private boolean enabled;
 
@@ -90,7 +93,8 @@ public class ReferenceResolver {
         }
 
         String user = "对话历史：\n" + recentTurns + "\n用户最后一句：" + text;
-        String rewritten = modelCaller.call(clients.small(), SYSTEM_PROMPT, user);
+        // 本地小模型冷启动慢，改写这种小任务也别用默认的 8 秒
+        String rewritten = modelCaller.call(clients.small(), SYSTEM_PROMPT, user, TIMEOUT_MS);
 
         if (rewritten == null || rewritten.isBlank()) {
             log.debug("指代消解改写失败，按原文处理：{}", text);

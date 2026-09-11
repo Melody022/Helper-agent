@@ -98,7 +98,7 @@ class M5CrossDomainTest {
     void capabilityResolvesBackToIntent() {
         assertThat(Intent.byCapability("equipment")).contains(Intent.EQUIPMENT_QUERY);
         assertThat(Intent.byCapability("chuzu")).contains(Intent.CHUZU_QUERY);
-        assertThat(Intent.byCapability("policy")).contains(Intent.POLICY_QUERY);
+        assertThat(Intent.byCapability("policy")).contains(Intent.KNOWLEDGE_QUERY);
 
         // 关键：CROSS_DOMAIN 自己也声明了这 5 个能力，但它是判定结果不是候选，
         // 反查必须优先命中具体的查询意图，否则又会绕回"跨域匹配跨域"

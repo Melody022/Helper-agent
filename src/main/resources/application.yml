@@ -140,13 +140,17 @@ routing:
   reference:
     enabled: true
 
-  # 第 2 层小模型的采信阈值。小模型常对错误答案也给高分，所以门槛设得比大模型高
+  # 第 2 层小模型的采信阈值与超时。小模型常对错误答案也给高分，所以门槛设得比大模型高
   small-model:
     min-confidence: 0.6
+    # 本地模型冷启动要把几 GB 权重读进内存，超时给得太紧会让首个请求静默降级到兜底
+    timeout-ms: ${AI_SMALL_MODEL_TIMEOUT_MS:30000}
 
-  # 第 3 层大模型的采信阈值。它是最后一层，再拦就只能 UNKNOWN，所以门槛放低
+  # 第 3 层大模型的采信阈值与超时。它是最后一层，再拦就只能 UNKNOWN，所以门槛放低
   llm:
     min-confidence: 0.4
+    # 主模型是推理型，先"想"一段再输出，超时要比普通对话宽
+    timeout-ms: ${AI_LLM_TIMEOUT_MS:45000}
 
   # 置 false 可关闭后两层模型，只跑关键词分类（离线回归 / 降本时用）
   model-layers-enabled: ${AI_MODEL_LAYERS_ENABLED:true}
@@ -159,13 +163,39 @@ routing:
     # 综合那一步的超时。它要读完各域结果再写一段完整回答，比分类耗时得多，给足
     synthesis-timeout-ms: ${AI_CROSS_DOMAIN_SYNTHESIS_TIMEOUT_MS:90000}
 
-# RAG（M6/M8 使用）
+# RAG：知识入库、混合召回、证据闸
 rag:
   embedding-dimensions: ${RAG_EMBEDDING_DIMENSIONS:1024}
+  embedding-model: text-embedding-v4
+
+  # 切片：按句子攒块，不是按固定字数硬切
+  chunk:
+    # 单块目标字符数。太小会把一个完整说法切散，太大检索粒度粗、喂给模型也浪费
+    max-chars: ${RAG_CHUNK_MAX_CHARS:400}
+    # 相邻块重叠，避免答案正好跨在两块中间被切断
+    overlap-chars: ${RAG_CHUNK_OVERLAP_CHARS:60}
+
+  # 混合召回：关键词(BM25) + 语义(KNN)，用 RRF 融合
+  retrieval:
+    # 最终喂给模型的证据条数
+    top-k: ${RAG_TOP_K:5}
+    # 每路各召回多少条候选，融合后再截断
+    candidates: ${RAG_CANDIDATES:20}
+    # KNN 考察的候选向量数，必须 >= candidates
+    num-candidates: ${RAG_NUM_CANDIDATES:100}
+
+  # 证据闸：资料不够就不让模型开口
   evidence-gate:
-    enabled: true
+    enabled: ${RAG_EVIDENCE_GATE_ENABLED:true}
+    # 最相关那条的相关性门槛（ES 的 cosine 得分，0~1）。
+    # 注意：这个值必须用评估集校准，拍脑袋设高了会把能答的问题也拒掉
     min-retrieval-score: ${RAG_MIN_RETRIEVAL_SCORE:0.6}
+    # 至少要有几条资料达到上面的门槛
     min-evidence-count: ${RAG_MIN_EVIDENCE_COUNT:1}
+
+  # 生成后自评：答案有没有超出资料。用本地小模型，判不出来时放行
+  self-eval:
+    enabled: ${RAG_SELF_EVAL_ENABLED:true}
 
 # 观测与成本
 langfuse:

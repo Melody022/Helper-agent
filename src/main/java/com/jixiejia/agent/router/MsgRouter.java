@@ -198,6 +198,7 @@ public class MsgRouter {
 
         String reason = (resolution.note() != null ? resolution.note() + "；" : "")
                 + "意图=" + intent.intent() + "(" + intent.confidence() + "/" + intent.layer().code() + ")"
+                + "；判定：" + intent.reason()
                 + "；没有粘性可用，按意图匹配 Agent";
 
         RoutingDecision decision = new RoutingDecision(

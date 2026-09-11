@@ -1,7 +1,10 @@
 package com.jixiejia.agent.chat;
 
 import com.jixiejia.agent.agent.AgentExecutor;
+import com.jixiejia.agent.classify.Intent;
 import com.jixiejia.agent.graph.CompositeGraph;
+import com.jixiejia.agent.rag.FlywheelService;
+import com.jixiejia.agent.rag.KnowledgeAnswerService;
 import com.jixiejia.agent.router.ConversationMemory;
 import com.jixiejia.agent.router.MsgRouter;
 import com.jixiejia.agent.router.RoutingDecision;
@@ -46,6 +49,8 @@ public class ChatService {
     private final ToolRegistry toolRegistry;
     private final ConversationMemory conversationMemory;
     private final CompositeGraph compositeGraph;
+    private final KnowledgeAnswerService knowledgeAnswerService;
+    private final FlywheelService flywheelService;
 
     /**
      * 一轮对话的产出。
@@ -114,12 +119,24 @@ public class ChatService {
                     1.0, null, decision.stage().code(), true);
         }
 
-        // ⑤ 执行。跨域走综合子图（多 Agent 并行 + 汇总），单域走原来的单 Agent。
+        // ⑤ 执行。三条路：平台规则走检索+证据闸，跨域走综合子图，其余走单 Agent。
         long startedAt = System.currentTimeMillis();
 
         String answer;
         String executedAgentKey;
-        if (decision.isComposite()) {
+        if (decision.intent() == Intent.KNOWLEDGE_QUERY) {
+            // 平台规则单独一条路，不经过 ReAct Agent。
+            // 因为这条道的硬要求是"资料不足就不许答"，而 Agent 里的模型有自主权，
+            // 完全可能不去查资料、直接凭对同类平台的印象回答——那样证据闸就形同虚设。
+            KnowledgeAnswerService.Answer knowledge =
+                    knowledgeAnswerService.answer(decision.resolvedText(), convId);
+            answer = knowledge.text();
+            executedAgentKey = "Knowledge(检索+证据闸)";
+            if (!knowledge.answered()) {
+                // 没答上来意味着这是个知识盲区，记进飞轮等人工补
+                log.debug("知识线未作答：{}", knowledge.note());
+            }
+        } else if (decision.isComposite()) {
             answer = runComposite(decision, roleKey);
             // 审计里记下本轮实际跑了哪些 Agent，用逗号分隔
             executedAgentKey = String.join(",", decision.targetAgents());
@@ -132,6 +149,12 @@ public class ChatService {
                         return AGENT_MISSING_REPLY;
                     });
             executedAgentKey = decision.agentKey();
+        }
+
+        // 意图完全没识别出来也是一类知识盲区：用户问的东西系统根本没这套业务
+        if (decision.intent() == Intent.UNKNOWN) {
+            flywheelService.record(FlywheelService.SOURCE_LOW_CONFIDENCE,
+                    convId, message, answer, decision.confidence());
         }
 
         int latency = (int) (System.currentTimeMillis() - startedAt);

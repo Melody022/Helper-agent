@@ -33,9 +33,20 @@ public abstract class AbstractModelClassifier {
     protected final LlmClients clients;
     protected final ModelCaller modelCaller;
 
-    protected AbstractModelClassifier(LlmClients clients, ModelCaller modelCaller) {
+    /**
+     * 本层的调用超时。
+     *
+     * <p>必须按层分别设置，不能共用一个小值：本地 Ollama 首次调用要把几 GB 的模型
+     * 读进内存（冷启动），十来秒很正常；主模型是推理型，先想后答也慢。
+     * 统一给 8 秒的后果是<b>两层双双超时</b>，这句话被判成 UNKNOWN、
+     * 静默降级到兜底 Agent——用户只会觉得"答得敷衍"，看不出是超时。
+     */
+    protected final long timeoutMs;
+
+    protected AbstractModelClassifier(LlmClients clients, ModelCaller modelCaller, long timeoutMs) {
         this.clients = clients;
         this.modelCaller = modelCaller;
+        this.timeoutMs = timeoutMs;
     }
 
     /** 本层使用的模型客户端。 */
@@ -70,7 +81,7 @@ public abstract class AbstractModelClassifier {
         user.append("用户当前这句话：").append(userText);
 
         try {
-            String raw = modelCaller.call(client(), SYSTEM_PROMPT, user.toString());
+            String raw = modelCaller.call(client(), SYSTEM_PROMPT, user.toString(), timeoutMs);
             return parse(raw);
         } catch (Exception e) {
             // 兜底：解析或调用出任何意外都只意味着"这一层没结论"，不该影响整体路由
@@ -170,7 +181,7 @@ public abstract class AbstractModelClassifier {
                 2. intent 必须是上面列表里的名字，不得自创，也不得输出 /reset 这类命令。
                 3. 一句话里同时问了两个及以上**不同领域**的问题时选 CROSS_DOMAIN，
                    并在 domains 里列出涉及的领域。domains 的取值只能是：
-                   equipment(设备买卖) / chuzu(出租) / qiuzu(求租) / demand(用机需求询价) / news(资讯) / policy(平台规则)。
+                   equipment(设备买卖) / chuzu(出租) / qiuzu(求租) / demand(用机需求询价) / news(资讯) / policy(平台规则/设备维修保养等知识)。
                    注意 chuzu、qiuzu、demand 都属于"租赁"这一块业务，
                    如果只问了其中一个，不算跨域。
                 4. 判断不了就选 UNKNOWN，并把 confidence 打到 0.3 以下，不要瞎猜。

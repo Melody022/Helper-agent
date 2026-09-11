@@ -3,6 +3,7 @@ package com.jixiejia.agent.classify;
 import com.jixiejia.agent.llm.LlmClients;
 import com.jixiejia.agent.llm.ModelCaller;
 import org.springframework.ai.chat.client.ChatClient;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
 /**
@@ -15,8 +16,12 @@ import org.springframework.stereotype.Component;
 @Component
 public class SmallModelClassifier extends AbstractModelClassifier {
 
-    public SmallModelClassifier(LlmClients clients, ModelCaller modelCaller) {
-        super(clients, modelCaller);
+    /** 本地模型冷启动要把几 GB 读进内存，超时给得比别的层宽 */
+    private static final long DEFAULT_TIMEOUT_MS = 30_000L;
+
+    public SmallModelClassifier(LlmClients clients, ModelCaller modelCaller,
+                                @Value("${routing.small-model.timeout-ms:30000}") long timeoutMs) {
+        super(clients, modelCaller, timeoutMs > 0 ? timeoutMs : DEFAULT_TIMEOUT_MS);
     }
 
     @Override

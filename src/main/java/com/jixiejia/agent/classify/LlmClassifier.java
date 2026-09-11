@@ -3,6 +3,7 @@ package com.jixiejia.agent.classify;
 import com.jixiejia.agent.llm.LlmClients;
 import com.jixiejia.agent.llm.ModelCaller;
 import org.springframework.ai.chat.client.ChatClient;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
 /**
@@ -11,8 +12,12 @@ import org.springframework.stereotype.Component;
 @Component
 public class LlmClassifier extends AbstractModelClassifier {
 
-    public LlmClassifier(LlmClients clients, ModelCaller modelCaller) {
-        super(clients, modelCaller);
+    /** 主模型是推理型，会先"想"一段再输出，超时要比普通对话宽 */
+    private static final long DEFAULT_TIMEOUT_MS = 45_000L;
+
+    public LlmClassifier(LlmClients clients, ModelCaller modelCaller,
+                         @Value("${routing.llm.timeout-ms:45000}") long timeoutMs) {
+        super(clients, modelCaller, timeoutMs > 0 ? timeoutMs : DEFAULT_TIMEOUT_MS);
     }
 
     @Override

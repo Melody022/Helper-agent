@@ -22,6 +22,7 @@
         <spring-ai.version>2.0.0</spring-ai.version>
         <langgraph4j.version>1.8.27</langgraph4j.version>
         <mybatis-plus.version>3.5.17</mybatis-plus.version>
+        <elasticsearch.version>8.10.0</elasticsearch.version>
         <springdoc.version>3.0.1</springdoc.version>
         <hutool.version>5.8.28</hutool.version>
     </properties>
@@ -114,6 +115,18 @@
             <groupId>com.baomidou</groupId>
             <artifactId>mybatis-plus-jsqlparser</artifactId>
             <version>${mybatis-plus.version}</version>
+        </dependency>
+
+        <!--
+          Elasticsearch 客户端。只引官方的 elasticsearch-java（类型安全的 Java API 客户端），
+          不用 spring-boot-starter-data-elasticsearch：知识库检索要自己拼
+          "向量 KNN + 关键词 BM25 两次查询再融合 RRF"，Spring Data 那套 Repository 抽象
+          在这里帮不上忙，反而多一层。版本与服务端 ES 8.10.0 对齐。
+        -->
+        <dependency>
+            <groupId>co.elastic.clients</groupId>
+            <artifactId>elasticsearch-java</artifactId>
+            <version>${elasticsearch.version}</version>
         </dependency>
 
         <!-- MySQL 驱动 -->
