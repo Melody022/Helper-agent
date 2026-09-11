@@ -1,6 +1,7 @@
 package com.jixiejia.agent.chat;
 
 import com.jixiejia.agent.agent.AgentExecutor;
+import com.jixiejia.agent.graph.CompositeGraph;
 import com.jixiejia.agent.router.ConversationMemory;
 import com.jixiejia.agent.router.MsgRouter;
 import com.jixiejia.agent.router.RoutingDecision;
@@ -37,10 +38,14 @@ public class ChatService {
     private static final String AGENT_MISSING_REPLY =
             "抱歉，这个功能暂时不可用，请稍后再试或回复\"转人工\"联系客服。";
 
+    private static final String COMPOSITE_FAILED_REPLY =
+            "抱歉，你这几个问题我都没能查到，可以分开一个个问，或者回复\"转人工\"联系客服。";
+
     private final MsgRouter msgRouter;
     private final AgentExecutor agentExecutor;
     private final ToolRegistry toolRegistry;
     private final ConversationMemory conversationMemory;
+    private final CompositeGraph compositeGraph;
 
     /**
      * 一轮对话的产出。
@@ -109,26 +114,47 @@ public class ChatService {
                     1.0, null, decision.stage().code(), true);
         }
 
-        // ⑤ 执行 Agent。工具按路由结果过滤——Agent 拿到的就是它被允许用的
-        ToolCallback[] tools = toolRegistry.callbacksFor(decision.toolNames());
+        // ⑤ 执行。跨域走综合子图（多 Agent 并行 + 汇总），单域走原来的单 Agent。
         long startedAt = System.currentTimeMillis();
 
-        String answer = agentExecutor
-                .execute(decision.agentKey(), decision.resolvedText(), history, List.of(tools))
-                .orElseGet(() -> {
-                    log.warn("路由选中了 Agent {}，但代码中没有对应实现", decision.agentKey());
-                    return AGENT_MISSING_REPLY;
-                });
+        String answer;
+        String executedAgentKey;
+        if (decision.isComposite()) {
+            answer = runComposite(decision, roleKey);
+            // 审计里记下本轮实际跑了哪些 Agent，用逗号分隔
+            executedAgentKey = String.join(",", decision.targetAgents());
+        } else {
+            ToolCallback[] tools = toolRegistry.callbacksFor(decision.toolNames());
+            answer = agentExecutor
+                    .execute(decision.agentKey(), decision.resolvedText(), history, List.of(tools))
+                    .orElseGet(() -> {
+                        log.warn("路由选中了 Agent {}，但代码中没有对应实现", decision.agentKey());
+                        return AGENT_MISSING_REPLY;
+                    });
+            executedAgentKey = decision.agentKey();
+        }
 
         int latency = (int) (System.currentTimeMillis() - startedAt);
 
         // ⑥ 落助手消息
         conversationMemory.saveAssistantMessage(convId, answer,
                 decision.intent() == null ? null : decision.intent().name(),
-                decision.confidence(), decision.agentKey(), latency);
+                decision.confidence(), executedAgentKey, latency);
 
         return new ChatResult(convId, answer,
                 decision.intent() == null ? null : decision.intent().name(),
-                decision.confidence(), decision.agentKey(), decision.stage().code(), false);
+                decision.confidence(), executedAgentKey, decision.stage().code(), false);
+    }
+
+    /** 跨域：交给综合子图并行跑各域再汇总。 */
+    private String runComposite(RoutingDecision decision, String roleKey) {
+        CompositeGraph.CompositeResult result = compositeGraph.run(
+                decision.resolvedText(), roleKey, decision.targetAgents());
+
+        if (result.answer() == null || result.answer().isBlank()) {
+            log.warn("跨域综合未产出回答，目标域={}", result.agentKeys());
+            return COMPOSITE_FAILED_REPLY;
+        }
+        return result.answer();
     }
 }

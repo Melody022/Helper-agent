@@ -117,4 +117,31 @@ public class KeywordWeightClassifier {
                 ? Optional.empty()
                 : Optional.of(scored.ranked().get(0).getKey());
     }
+
+    /**
+     * 只列高权重命中的意图，按得分降序。
+     * 跨域判定专用：阈值就取本类的高权重，避免调用方再抄一份数字。
+     */
+    public List<Intent> highWeightIntents(String text) {
+        return matchedIntents(text, highWeight);
+    }
+
+    /**
+     * 列出所有得分不低于 minWeight 的意图，按得分降序。
+     *
+     * <p>给跨域判定用：它关心的是"这句话同时指向了几个领域"，而不是"最像哪一个"，
+     * 所以不能只看 top-1。返回顺序即强弱顺序，调用方据此在超出上限时截断。
+     *
+     * <p>注意 CROSS_DOMAIN 本身会被跳过——它是判定结果，不是候选。
+     */
+    public List<Intent> matchedIntents(String text, double minWeight) {
+        if (text == null || text.isBlank()) {
+            return List.of();
+        }
+        return score(text).ranked().stream()
+                .filter(e -> e.getValue() >= minWeight)
+                .filter(e -> e.getKey() != Intent.UNKNOWN && e.getKey() != Intent.CROSS_DOMAIN)
+                .map(Map.Entry::getKey)
+                .toList();
+    }
 }

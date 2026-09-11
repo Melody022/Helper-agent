@@ -102,12 +102,28 @@ public abstract class AbstractModelClassifier {
             confidence = Math.max(0.0, Math.min(1.0, confidence));
 
             return Optional.of(IntentResult.of(intent, confidence, layer(),
-                    "模型判定：" + payload));
+                    "模型判定：" + payload, readDomains(node)));
 
         } catch (Exception e) {
             log.debug("{} 层返回 JSON 解析失败：{}", layerName(), abbreviate(raw));
             return Optional.empty();
         }
+    }
+
+    /** 读取跨域时模型给出的领域列表。非跨域、缺失或格式不对都返回空集合。 */
+    private static java.util.Set<String> readDomains(JsonNode node) {
+        JsonNode domainsNode = node.path("domains");
+        if (!domainsNode.isArray()) {
+            return java.util.Set.of();
+        }
+        java.util.Set<String> domains = new java.util.LinkedHashSet<>();
+        domainsNode.forEach(n -> {
+            String v = n.asText(null);
+            if (v != null && !v.isBlank()) {
+                domains.add(v.trim().toLowerCase());
+            }
+        });
+        return domains;
     }
 
     /** 从可能带解释文字的回复里截出第一个完整的 JSON 对象。 */
@@ -148,9 +164,15 @@ public abstract class AbstractModelClassifier {
         sb.append("""
 
                 规则：
-                1. 只输出一个 JSON 对象，形如 {"intent":"CHUZU_QUERY","confidence":0.92}，不要输出任何别的内容。
+                1. 只输出一个 JSON 对象，不要输出任何别的内容：
+                   普通情况形如 {"intent":"CHUZU_QUERY","confidence":0.92}
+                   跨域时形如 {"intent":"CROSS_DOMAIN","confidence":0.9,"domains":["equipment","chuzu"]}
                 2. intent 必须是上面列表里的名字，不得自创，也不得输出 /reset 这类命令。
-                3. 一句话里同时问了两个及以上不同领域的问题时，选 CROSS_DOMAIN。
+                3. 一句话里同时问了两个及以上**不同领域**的问题时选 CROSS_DOMAIN，
+                   并在 domains 里列出涉及的领域。domains 的取值只能是：
+                   equipment(设备买卖) / chuzu(出租) / qiuzu(求租) / demand(用机需求询价) / news(资讯) / policy(平台规则)。
+                   注意 chuzu、qiuzu、demand 都属于"租赁"这一块业务，
+                   如果只问了其中一个，不算跨域。
                 4. 判断不了就选 UNKNOWN，并把 confidence 打到 0.3 以下，不要瞎猜。
                 5. confidence 是你对判断的把握，取值 0 到 1。
                 """);

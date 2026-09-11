@@ -29,6 +29,12 @@ public enum RouteStage {
     /** ⑦ 执行（交由 M5 的 LangGraph4j 图完成） */
     EXECUTE("execute", "执行"),
 
+    /**
+     * 跨域综合：一句话里命中多个领域，由综合子图并行跑各域 Agent 后汇总。
+     * 与 EXECUTE 区分开，是为了在审计里能一眼看出"这条走了昂贵的多域路径"。
+     */
+    COMPOSITE("composite", "跨域综合"),
+
     /** 转人工：短路入队，不经过 Agent */
     HANDOFF("handoff", "转人工"),
 

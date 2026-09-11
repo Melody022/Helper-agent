@@ -3,6 +3,7 @@ package com.jixiejia.agent.router;
 import com.jixiejia.agent.classify.ClassifyLayer;
 import com.jixiejia.agent.classify.Intent;
 
+import java.util.List;
 import java.util.Set;
 
 /**
@@ -12,7 +13,8 @@ import java.util.Set;
  * @param intent         识别出的意图
  * @param confidence     意图置信度
  * @param classifyLayer  意图在哪一层定案
- * @param agentKey       命中的 Agent，短路时为 null
+ * @param agentKey       单域时命中的 Agent；跨域时为 null
+ * @param agentKeys      跨域时命中的多个 Agent（并行执行），单域时为空
  * @param toolNames      该 Agent 在本角色下可用的工具
  * @param resolvedText   指代消解后的文本，未做消解时等于原文
  * @param reply          短路回复（转人工/投诉/系统命令）；非短路为 null
@@ -24,6 +26,7 @@ public record RoutingDecision(
         double confidence,
         ClassifyLayer classifyLayer,
         String agentKey,
+        Set<String> agentKeys,
         Set<String> toolNames,
         String resolvedText,
         String reply,
@@ -33,7 +36,7 @@ public record RoutingDecision(
     /** 短路决策：不经过 Agent，直接回固定话术。 */
     public static RoutingDecision shortCircuit(RouteStage stage, Intent intent, String reply, String reason) {
         return new RoutingDecision(stage, intent, 1.0, ClassifyLayer.KEYWORD,
-                null, Set.of(), null, reply, reason);
+                null, Set.of(), Set.of(), null, reply, reason);
     }
 
     public boolean isShortCircuited() {
@@ -42,6 +45,19 @@ public record RoutingDecision(
 
     /** 是否需要真正跑 Agent。 */
     public boolean needsAgent() {
-        return !isShortCircuited() && agentKey != null;
+        return !isShortCircuited() && (agentKey != null || isComposite());
+    }
+
+    /** 是否走了跨域综合子图。 */
+    public boolean isComposite() {
+        return agentKeys != null && agentKeys.size() >= 2;
+    }
+
+    /** 本轮要执行的 Agent 列表：单域一个，跨域多个。 */
+    public List<String> targetAgents() {
+        if (isComposite()) {
+            return List.copyOf(agentKeys);
+        }
+        return agentKey == null ? List.of() : List.of(agentKey);
     }
 }

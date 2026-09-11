@@ -151,6 +151,14 @@ routing:
   # 置 false 可关闭后两层模型，只跑关键词分类（离线回归 / 降本时用）
   model-layers-enabled: ${AI_MODEL_LAYERS_ENABLED:true}
 
+  # 跨域综合：一句话命中多个领域时，各域 Agent 并行跑完再汇总
+  cross-domain:
+    # 单轮最多并行跑几个域。每个域是一次完整的 Agent 调用（模型 + 工具循环），
+    # 上限直接决定这条路径的成本，所以宁小勿大
+    max-agents: ${AI_CROSS_DOMAIN_MAX_AGENTS:3}
+    # 综合那一步的超时。它要读完各域结果再写一段完整回答，比分类耗时得多，给足
+    synthesis-timeout-ms: ${AI_CROSS_DOMAIN_SYNTHESIS_TIMEOUT_MS:90000}
+
 # RAG（M6/M8 使用）
 rag:
   embedding-dimensions: ${RAG_EMBEDDING_DIMENSIONS:1024}

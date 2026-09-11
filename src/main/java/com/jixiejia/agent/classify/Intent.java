@@ -130,6 +130,25 @@ public enum Intent {
     }
 
     /**
+     * 按能力标识反查意图。跨域时模型给出的是领域（capability），
+     * 路由需要把它还原成意图才能走正常的 Agent 匹配。
+     *
+     * @return 覆盖该能力的第一个查询类意图；没有则 empty
+     */
+    public static java.util.Optional<Intent> byCapability(String capability) {
+        if (capability == null || capability.isBlank()) {
+            return java.util.Optional.empty();
+        }
+        String target = capability.trim();
+        for (Intent i : values()) {
+            if (i.capabilities().contains(target)) {
+                return java.util.Optional.of(i);
+            }
+        }
+        return java.util.Optional.empty();
+    }
+
+    /**
      * 把模型返回的字符串解析成意图。
      *
      * <p>两个约束在这里落地：

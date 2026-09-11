@@ -1,6 +1,7 @@
 package com.jixiejia.agent.router;
 
 import com.baomidou.mybatisplus.core.toolkit.Wrappers;
+import com.jixiejia.agent.classify.ClassifyLayer;
 import com.jixiejia.agent.classify.Intent;
 import com.jixiejia.agent.classify.IntentClassifier;
 import com.jixiejia.agent.classify.IntentResult;
@@ -9,14 +10,16 @@ import com.jixiejia.agent.persistence.entity.ai.AiUser;
 import com.jixiejia.agent.persistence.mapper.ai.AiUserMapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
+import java.util.LinkedHashSet;
+import java.util.List;
 import java.util.Optional;
 import java.util.Set;
 
 /**
  * 消息路由链：① 身份 → ② 命令 → ③ 粘性 → ④ 指代消解 → ⑤ 三层意图 → ⑥ Agent 匹配 → ⑦ 审计。
- *
  * <p>整条链的取向是<b>确定性优先 + 从便宜到贵</b>：能靠规则、缓存、白名单判定的绝不交给模型；
  * 模型只在第 ⑤ 步参与，且它的输出还要过一遍枚举校验。这样即使模型乱答，
  * 最坏也只是落进兜底 Agent，不会触发越权动作或错误路由。
@@ -64,6 +67,10 @@ public class MsgRouter {
     private final AgentRegistry agentRegistry;
     private final AuditService auditService;
 
+    /** 单轮跨域最多并行跑几个域，与 CompositeGraph 读同一个配置项 */
+    @Value("${routing.cross-domain.max-agents:3}")
+    private int crossDomainMaxAgents;
+
     /**
      * 执行一次路由。本方法只做判定，不执行 Agent、不落消息——
      * 消息的落库与图执行由 M5 的对话服务负责，路由层保持无副作用便于单独回归。
@@ -105,6 +112,19 @@ public class MsgRouter {
                 stickySessionStore.find(request.conversationId());
         Optional<IntentResult> byKeyword = keywordClassifier.classify(message);
 
+        // 跨域判定必须排在单域路由之前。否则它会走进 AgentRegistry 的"能力交集最多者胜"，
+        // 被交集最多的那个 Agent 整条吃掉——用户问三件事，只答一件，且看不出错在哪。
+        Optional<List<String>> crossAgents = detectCrossDomain(message, roleKey);
+        if (crossAgents.isPresent()) {
+            RoutingDecision decision = new RoutingDecision(
+                    RouteStage.COMPOSITE, Intent.CROSS_DOMAIN, 0.9, ClassifyLayer.KEYWORD,
+                    null, new LinkedHashSet<>(crossAgents.get()), Set.of(),
+                    message, null,
+                    "命中 " + crossAgents.get().size() + " 个领域，走跨域综合子图：" + crossAgents.get());
+            log.debug("跨域命中：{} -> {}", message, crossAgents.get());
+            return auditAndReturn(request, decision, start);
+        }
+
         if (byKeyword.isPresent()) {
             return routeByKnownIntent(request, byKeyword.get(), sticky, roleKey, start);
         }
@@ -117,7 +137,7 @@ public class MsgRouter {
                 Intent stickyIntent = Intent.parse(sticky.get().intent());
                 RoutingDecision decision = new RoutingDecision(
                         RouteStage.STICKY, stickyIntent, 1.0, null,
-                        reuse.get().agentKey(), reuse.get().toolNames(), message,
+                        reuse.get().agentKey(), Set.of(), reuse.get().toolNames(), message,
                         null, "关键词未命中，沿用会话粘性 Agent=" + reuse.get().agentKey());
                 log.debug("粘性兜底：{} -> {}", message, reuse.get().agentKey());
                 return auditAndReturn(request, decision, start);
@@ -138,6 +158,36 @@ public class MsgRouter {
             return auditAndReturn(request, shortCircuitFor(intent), start);
         }
 
+        // 模型也可能判出跨域（关键词层漏掉的说法）。这条路径必须单独处理——
+        // 直接丢进下面的单 Agent 匹配，会被"能力交集最多者胜"整条吃掉，
+        // 用户问的三件事只答一件，且看不出错在哪。
+        if (intent.intent() == Intent.CROSS_DOMAIN) {
+            List<String> agents = resolveCrossAgents(intent, resolution.text(), roleKey);
+            if (agents.size() >= 2) {
+                RoutingDecision composite = new RoutingDecision(
+                        RouteStage.COMPOSITE, Intent.CROSS_DOMAIN, intent.confidence(), intent.layer(),
+                        null, new LinkedHashSet<>(agents), Set.of(), resolution.text(), null,
+                        "模型判为跨域，涉及 " + agents.size() + " 个领域：" + agents);
+                log.debug("模型判定跨域：{} -> {}", message, agents);
+                return auditAndReturn(request, composite, start);
+            }
+            if (agents.size() == 1) {
+                // 判成跨域但只有一个领域站得住，按单域走，别硬凑综合
+                AgentRegistry.AgentMatch single = matchAgent(intent.intent(), roleKey, agents.get(0));
+                if (single == null) {
+                    return auditAndReturn(request, RoutingDecision.shortCircuit(
+                            RouteStage.ERROR, Intent.CROSS_DOMAIN, NO_AGENT_REPLY, "无可用 Agent"), start);
+                }
+                RoutingDecision decision = new RoutingDecision(
+                        RouteStage.EXECUTE, Intent.CROSS_DOMAIN, intent.confidence(), intent.layer(),
+                        single.agentKey(), Set.of(), single.toolNames(), resolution.text(), null,
+                        "模型判为跨域但只解析出 1 个领域，按单域处理：" + single.agentKey());
+                return auditAndReturn(request, decision, start);
+            }
+            // 一个领域都解析不出来，落到下面的兜底匹配
+            log.debug("模型判为跨域但解析不出任何领域，退回兜底匹配");
+        }
+
         // ---------- ⑥ Agent 匹配 ----------
         AgentRegistry.AgentMatch match = matchAgent(intent.intent(), roleKey, null);
         if (match == null) {
@@ -152,7 +202,7 @@ public class MsgRouter {
 
         RoutingDecision decision = new RoutingDecision(
                 RouteStage.EXECUTE, intent.intent(), intent.confidence(), intent.layer(),
-                match.agentKey(), match.toolNames(), resolution.text(), null, reason);
+                match.agentKey(), Set.of(), match.toolNames(), resolution.text(), null, reason);
 
         return auditAndReturn(request, decision, start);
     }
@@ -193,9 +243,72 @@ public class MsgRouter {
 
         RoutingDecision decision = new RoutingDecision(
                 stage, intent, keywordIntent.confidence(), keywordIntent.layer(),
-                match.agentKey(), match.toolNames(), request.message(), null, reason);
+                match.agentKey(), Set.of(), match.toolNames(), request.message(), null, reason);
 
         return auditAndReturn(request, decision, start);
+    }
+
+    /**
+     * 跨域判定：这句话是否同时命中了多个<b>不同 Agent</b> 负责的领域。
+     *
+     * <p>三个刻意的取舍：
+     * <ol>
+     *   <li><b>只认高权重命中</b>。中权重词（"价格""设备"）跨域出现得太频繁，
+     *       拿它触发会让这条昂贵路径天天误触发；</li>
+     *   <li><b>按解析后的 Agent 去重计数，而不是按意图计数</b>。chuzu / qiuzu / demand
+     *       三个意图都属于 RentalAgent，按意图数会把"有人要租吗、也有人要找活吗"
+     *       判成跨域，然后把同一个 Agent 跑两遍；</li>
+     *   <li><b>排除兜底 Agent</b>。兜底本就不代表任何领域，把它算进去会让任意
+     *       "没匹配上"的组合都变成跨域。</li>
+     * </ol>
+     *
+     * @return 命中 ≥2 个 Agent 时返回它们（按关键词强弱排序、已截到上限），否则 empty
+     */
+    private Optional<List<String>> detectCrossDomain(String message, String roleKey) {
+        if (keywordClassifier.highWeightIntents(message).size() < 2) {
+            return Optional.empty();
+        }
+        List<String> agents = resolveCrossAgents(null, message, roleKey);
+        return agents.size() >= 2 ? Optional.of(agents) : Optional.empty();
+    }
+
+    /**
+     * 把跨域判定解析成"本轮要跑哪些 Agent"。两个来源取并集后按 Agent 去重：
+     * <ul>
+     *   <li>模型在 {@code domains} 里指出的领域（能覆盖关键词漏掉的说法）；</li>
+     *   <li>关键词高权重命中的意图（模型漏说时补上）。</li>
+     * </ul>
+     *
+     * <p>去重很关键：chuzu / qiuzu / demand 三个领域都由 RentalAgent 负责，
+     * 不去重会把同一个 Agent 排进去跑两遍。
+     *
+     * @return 去重后的 Agent 列表，可能为空或只有 1 个（调用方据此决定退化成单域）
+     */
+    private List<String> resolveCrossAgents(IntentResult intent, String text, String roleKey) {
+        Set<String> agents = new LinkedHashSet<>();
+
+        if (intent != null && intent.hasDomains()) {
+            for (String capability : intent.domains()) {
+                if (agents.size() >= crossDomainMaxAgents) {
+                    break;
+                }
+                Intent.byCapability(capability)
+                        .flatMap(mapped -> agentRegistry.match(mapped, roleKey))
+                        .filter(match -> !match.fallback())
+                        .ifPresent(match -> agents.add(match.agentKey()));
+            }
+        }
+
+        for (Intent hit : keywordClassifier.highWeightIntents(text)) {
+            if (agents.size() >= crossDomainMaxAgents) {
+                break;
+            }
+            agentRegistry.match(hit, roleKey)
+                    .filter(match -> !match.fallback())
+                    .ifPresent(match -> agents.add(match.agentKey()));
+        }
+
+        return List.copyOf(agents);
     }
 
     /** 短路意图（转人工 / 投诉）对应的决策。 */
