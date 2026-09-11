@@ -1,0 +1,448 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>机械家 AI 助手</title>
+    <style>
+        :root {
+            --bg: #f5f6f8;
+            --panel: #ffffff;
+            --border: #e3e5e9;
+            --text: #1f2329;
+            --muted: #8a9099;
+            --brand: #d97706;
+            --brand-soft: #fef3e2;
+            --user-bubble: #d97706;
+            --bot-bubble: #ffffff;
+        }
+
+        * { box-sizing: border-box; }
+
+        body {
+            margin: 0;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+                         "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+            background: var(--bg);
+            color: var(--text);
+            height: 100vh;
+            overflow: hidden;
+        }
+
+        /* ---------- 登录 ---------- */
+        #login {
+            height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .login-card {
+            width: 340px;
+            padding: 32px;
+            background: var(--panel);
+            border-radius: 12px;
+            box-shadow: 0 2px 16px rgba(0, 0, 0, .06);
+        }
+
+        .login-card h1 {
+            margin: 0 0 4px;
+            font-size: 20px;
+        }
+
+        .login-card p {
+            margin: 0 0 24px;
+            color: var(--muted);
+            font-size: 13px;
+        }
+
+        .login-card input {
+            width: 100%;
+            padding: 10px 12px;
+            margin-bottom: 12px;
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            font-size: 14px;
+            outline: none;
+        }
+
+        .login-card input:focus { border-color: var(--brand); }
+
+        .login-card button {
+            width: 100%;
+            padding: 11px;
+            border: none;
+            border-radius: 8px;
+            background: var(--brand);
+            color: #fff;
+            font-size: 14px;
+            cursor: pointer;
+        }
+
+        .login-card button:hover { background: #c2690a; }
+
+        .login-card button:disabled { background: #ccc; cursor: not-allowed; }
+
+        .err { color: #d93f3f; font-size: 13px; min-height: 18px; margin-top: 8px; }
+
+        /* ---------- 聊天 ---------- */
+        #chat { display: none; height: 100vh; flex-direction: column; }
+
+        header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 12px 20px;
+            background: var(--panel);
+            border-bottom: 1px solid var(--border);
+        }
+
+        header .title { font-weight: 600; font-size: 15px; }
+
+        header .who { color: var(--muted); font-size: 13px; }
+
+        header button {
+            border: 1px solid var(--border);
+            background: #fff;
+            border-radius: 6px;
+            padding: 5px 12px;
+            font-size: 13px;
+            cursor: pointer;
+            color: var(--muted);
+        }
+
+        #messages {
+            flex: 1;
+            overflow-y: auto;
+            padding: 20px;
+            display: flex;
+            flex-direction: column;
+            gap: 14px;
+        }
+
+        .row { display: flex; }
+        .row.user { justify-content: flex-end; }
+
+        .bubble {
+            max-width: 72%;
+            padding: 10px 14px;
+            border-radius: 12px;
+            font-size: 14px;
+            line-height: 1.65;
+            white-space: pre-wrap;
+            word-break: break-word;
+        }
+
+        .user .bubble {
+            background: var(--user-bubble);
+            color: #fff;
+            border-bottom-right-radius: 3px;
+        }
+
+        .bot .bubble {
+            background: var(--bot-bubble);
+            border: 1px solid var(--border);
+            border-bottom-left-radius: 3px;
+        }
+
+        /* 每个回答下面带一行路由信息，演示时一眼能看出走了哪条路 */
+        .meta {
+            margin-top: 6px;
+            font-size: 12px;
+            color: var(--muted);
+        }
+
+        .tag {
+            display: inline-block;
+            padding: 1px 7px;
+            margin-right: 5px;
+            border-radius: 4px;
+            background: var(--brand-soft);
+            color: #a35a05;
+            font-size: 11px;
+        }
+
+        .typing { color: var(--muted); font-size: 13px; font-style: italic; }
+
+        .examples {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+            padding: 0 20px 10px;
+        }
+
+        .examples button {
+            padding: 6px 12px;
+            border: 1px solid var(--border);
+            background: #fff;
+            border-radius: 16px;
+            font-size: 13px;
+            color: var(--muted);
+            cursor: pointer;
+        }
+
+        .examples button:hover { border-color: var(--brand); color: var(--brand); }
+
+        footer {
+            display: flex;
+            gap: 10px;
+            padding: 12px 20px 18px;
+            background: var(--panel);
+            border-top: 1px solid var(--border);
+        }
+
+        footer input {
+            flex: 1;
+            padding: 11px 14px;
+            border: 1px solid var(--border);
+            border-radius: 10px;
+            font-size: 14px;
+            outline: none;
+        }
+
+        footer input:focus { border-color: var(--brand); }
+
+        footer button {
+            padding: 0 22px;
+            border: none;
+            border-radius: 10px;
+            background: var(--brand);
+            color: #fff;
+            font-size: 14px;
+            cursor: pointer;
+        }
+
+        footer button:disabled { background: #ccc; cursor: not-allowed; }
+    </style>
+</head>
+<body>
+
+<!-- ============ 登录 ============ -->
+<div id="login">
+    <div class="login-card">
+        <h1>机械家 AI 助手</h1>
+        <p>找设备 · 查出租求租 · 问平台规则 · 发布信息</p>
+        <input id="username" placeholder="账号" autocomplete="username">
+        <input id="password" type="password" placeholder="密码" autocomplete="current-password">
+        <button id="loginBtn">登录</button>
+        <div class="err" id="loginErr"></div>
+    </div>
+</div>
+
+<!-- ============ 聊天 ============ -->
+<div id="chat">
+    <header>
+        <div>
+            <div class="title">机械家 AI 助手</div>
+            <div class="who" id="who"></div>
+        </div>
+        <button id="logoutBtn">退出</button>
+    </header>
+
+    <div id="messages"></div>
+
+    <div class="examples" id="examples">
+        <button>有没有二手的挖掘机</button>
+        <button>附近有挖掘机出租吗</button>
+        <button>平台收多少手续费</button>
+        <button>有二手的挖掘机吗，另外有没有挖掘机出租</button>
+    </div>
+
+    <footer>
+        <input id="input" placeholder="说点什么…（回车发送）" autocomplete="off">
+        <button id="sendBtn">发送</button>
+    </footer>
+</div>
+
+<script>
+    const state = {
+        token: null,
+        user: null,
+        conversationId: null,
+        sending: false
+    };
+
+    const $ = id => document.getElementById(id);
+
+    // ---------- 登录 ----------
+    async function login() {
+        const username = $('username').value.trim();
+        const password = $('password').value;
+        if (!username || !password) {
+            $('loginErr').textContent = '请填写账号和密码';
+            return;
+        }
+        $('loginBtn').disabled = true;
+        $('loginErr').textContent = '';
+
+        try {
+            const res = await fetch('/api/auth/login', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({username, password})
+            });
+            const data = await res.json();
+            if (!res.ok) {
+                $('loginErr').textContent = data.message || '登录失败';
+                return;
+            }
+            state.token = data.token;
+            state.user = data.user;
+            showChat();
+        } catch (e) {
+            $('loginErr').textContent = '连不上服务，确认应用已启动';
+        } finally {
+            $('loginBtn').disabled = false;
+        }
+    }
+
+    function showChat() {
+        $('login').style.display = 'none';
+        $('chat').style.display = 'flex';
+        $('who').textContent = state.user.username +
+            '（' + (state.user.roles || []).join('/') + '）';
+        addBotMessage('你好，我是机械家的智能助手。可以帮你找设备、查出租求租、问平台规则。\n' +
+            '试试下面的问题，或者直接说你想干什么。');
+        $('input').focus();
+    }
+
+    // ---------- 发消息 ----------
+    async function send(text) {
+        if (state.sending) return;
+        const message = (text || $('input').value).trim();
+        if (!message) return;
+
+        state.sending = true;
+        $('sendBtn').disabled = true;
+        $('input').value = '';
+        addUserMessage(message);
+
+        const typing = addTyping();
+
+        try {
+            const res = await fetch('/api/chat', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': 'Bearer ' + state.token
+                },
+                body: JSON.stringify({
+                    conversationId: state.conversationId,
+                    message: message
+                })
+            });
+
+            typing.remove();
+
+            if (res.status === 401) {
+                addBotMessage('登录已过期，请重新登录。');
+                logout();
+                return;
+            }
+
+            const data = await res.json();
+            if (!res.ok) {
+                addBotMessage('出错了：' + (data.message || res.status));
+                return;
+            }
+
+            // 记下会话 id，后续追问才连得上上下文
+            state.conversationId = data.conversationId;
+            addBotMessage(data.answer, data);
+
+        } catch (e) {
+            typing.remove();
+            addBotMessage('连不上服务：' + e.message);
+        } finally {
+            state.sending = false;
+            $('sendBtn').disabled = false;
+            $('input').focus();
+        }
+    }
+
+    // ---------- 渲染 ----------
+    function addUserMessage(text) {
+        const row = document.createElement('div');
+        row.className = 'row user';
+        const b = document.createElement('div');
+        b.className = 'bubble';
+        b.textContent = text;
+        row.appendChild(b);
+        $('messages').appendChild(row);
+        scrollDown();
+    }
+
+    function addBotMessage(text, meta) {
+        const row = document.createElement('div');
+        row.className = 'row bot';
+
+        const wrap = document.createElement('div');
+
+        const b = document.createElement('div');
+        b.className = 'bubble';
+        b.textContent = text;
+        wrap.appendChild(b);
+
+        // 把路由结果显示出来：演示时能直观看到"这句话被交给了谁"
+        if (meta) {
+            const m = document.createElement('div');
+            m.className = 'meta';
+            let html = '';
+            if (meta.intent) html += '<span class="tag">' + meta.intent + '</span>';
+            if (meta.agentKey) html += '<span class="tag">' + meta.agentKey + '</span>';
+            if (meta.stage) html += '<span class="tag">' + meta.stage + '</span>';
+            m.innerHTML = html;
+            wrap.appendChild(m);
+        }
+
+        row.appendChild(wrap);
+        $('messages').appendChild(row);
+        scrollDown();
+    }
+
+    function addTyping() {
+        const row = document.createElement('div');
+        row.className = 'row bot';
+        const b = document.createElement('div');
+        b.className = 'bubble typing';
+        b.textContent = '正在处理…';
+        row.appendChild(b);
+        $('messages').appendChild(row);
+        scrollDown();
+        return row;
+    }
+
+    function scrollDown() {
+        const box = $('messages');
+        box.scrollTop = box.scrollHeight;
+    }
+
+    function logout() {
+        fetch('/api/auth/logout', {
+            method: 'POST',
+            headers: {'Authorization': 'Bearer ' + state.token}
+        }).catch(() => {});
+        state.token = null;
+        state.user = null;
+        state.conversationId = null;
+        $('messages').innerHTML = '';
+        $('chat').style.display = 'none';
+        $('login').style.display = 'flex';
+        $('password').value = '';
+    }
+
+    // ---------- 事件 ----------
+    $('loginBtn').onclick = login;
+    $('password').onkeydown = e => { if (e.key === 'Enter') login(); };
+    $('sendBtn').onclick = () => send();
+    $('input').onkeydown = e => { if (e.key === 'Enter') send(); };
+    $('logoutBtn').onclick = logout;
+
+    $('examples').onclick = e => {
+        if (e.target.tagName === 'BUTTON') send(e.target.textContent);
+    };
+
+    $('username').focus();
+</script>
+</body>
+</html>
