@@ -111,15 +111,14 @@
             <scope>runtime</scope>
         </dependency>
 
-        <!-- Jackson -->
-        <dependency>
-            <groupId>com.fasterxml.jackson.core</groupId>
-            <artifactId>jackson-databind</artifactId>
-        </dependency>
-        <dependency>
-            <groupId>com.fasterxml.jackson.datatype</groupId>
-            <artifactId>jackson-datatype-jsr310</artifactId>
-        </dependency>
+        <!--
+          JSON：一律使用 Jackson 3（tools.jackson.*）。
+          Spring Boot 4.1 与 Spring AI 2.0 都基于 Jackson 3，java.time 已内置在 jackson-databind 里，
+          因此这里不再显式声明 Jackson 2 的 jackson-databind / jackson-datatype-jsr310——
+          同时留两套 Jackson 只会让人误 import com.fasterxml 那套，而它并不被容器配置，
+          序列化 LocalDateTime 时会静默失败。
+          （注：JsonInclude 等注解仍在 com.fasterxml.jackson.annotation 包下，由 jackson-annotations 传递提供。）
+        -->
 
         <!-- BCrypt 密码哈希（不引入 Security 全家桶） -->
         <dependency>
