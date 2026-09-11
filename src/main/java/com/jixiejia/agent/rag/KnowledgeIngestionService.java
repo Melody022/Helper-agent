@@ -22,6 +22,7 @@ import java.io.BufferedReader;
 import java.io.InputStreamReader;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -310,6 +311,68 @@ public class KnowledgeIngestionService {
         }
         // sourceId 用序号：稳定、可重复执行，改了正文也不会插出重复条目
         seeds.add(new KnowledgeSeed("builtin-" + (seeds.size() + 1), title, content));
+    }
+
+    /**
+     * 索引对账：删掉 ES 里存在、但 MySQL 里已经没有对应文档的"孤儿"。
+     *
+     * <p>为什么需要这个：删除是分两步做的（先 MySQL 后 ES），中间任何一步失败、
+     * 或者像本项目踩到的那样——文档被"逻辑删除"后 MySQL 查询自动过滤掉、
+     * 于是清理时根本看不见它——都会在 ES 里留下查得到、实际已失效的旧内容。
+     * 用户搜到这种内容，会得到一个基于过期资料的答案。
+     *
+     * <p>搜索引擎和数据源分离的架构里，这种不一致迟早会发生，
+     * 所以要把对账做成常规操作，而不是出问题了再手工清。
+     *
+     * @return 清掉的孤儿数量
+     */
+    public int reconcileIndex() throws Exception {
+        if (!knowledgeIndex.available()) {
+            throw new IllegalStateException("Elasticsearch 不可用，无法对账");
+        }
+
+        // 索引量级不大，一次性把 docId 聚合出来即可；真要上百万条得改成 scroll
+        var response = es.search(s -> s
+                        .index(KnowledgeIndex.NAME)
+                        .size(0)
+                        .aggregations("docIds", a -> a.terms(t -> t
+                                .field(KnowledgeIndex.fieldDocId())
+                                .size(10_000))),
+                Map.class);
+
+        // docId 映射是 long，聚合结果取 lterms（long terms）而不是 sterms
+        List<Long> indexedDocIds = response.aggregations()
+                .get("docIds").lterms().buckets().array().stream()
+                .map(b -> b.key())
+                .toList();
+
+        if (indexedDocIds.isEmpty()) {
+            return 0;
+        }
+
+        // 用 selectCount 逐个查代价高，一次性把库里现有的 id 取出来对比
+        List<Object> existing = docMapper.selectObjs(
+                Wrappers.<AiKnowledgeDoc>lambdaQuery().select(AiKnowledgeDoc::getId));
+
+        java.util.Set<Long> alive = new HashSet<>();
+        for (Object id : existing) {
+            if (id instanceof Number n) {
+                alive.add(n.longValue());
+            }
+        }
+
+        int removed = 0;
+        for (Long docId : indexedDocIds) {
+            if (alive.contains(docId)) {
+                continue;
+            }
+            es.deleteByQuery(d -> d
+                    .index(KnowledgeIndex.NAME)
+                    .query(q -> q.term(t -> t.field(KnowledgeIndex.fieldDocId()).value(docId))));
+            removed++;
+            log.info("对账清理孤儿文档：docId={}", docId);
+        }
+        return removed;
     }
 
     /** 删掉某文档的所有切片，MySQL 与 ES 两边都清，避免留下查得到但已失效的旧内容。 */

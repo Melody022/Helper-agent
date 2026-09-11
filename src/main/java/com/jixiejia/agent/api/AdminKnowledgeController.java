@@ -80,6 +80,21 @@ public class AdminKnowledgeController {
         return ResponseEntity.ok(result);
     }
 
+    @Operation(summary = "索引对账",
+            description = "清理 ES 里存在、MySQL 里已无对应文档的孤儿切片。删除是分两步做的，"
+                    + "中间失败会留下查得到但已失效的旧内容，需要定期对账")
+    @PostMapping("/reconcile")
+    public ResponseEntity<?> reconcile() {
+        try {
+            int removed = ingestionService.reconcileIndex();
+            return ResponseEntity.ok(Map.of("code", 200, "removed", removed,
+                    "message", removed == 0 ? "没有孤儿，索引与数据库一致" : "已清理 " + removed + " 个孤儿"));
+        } catch (Exception e) {
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
+                    .body(Map.of("code", 500, "message", "对账失败：" + e.getMessage()));
+        }
+    }
+
     @Operation(summary = "飞轮待审列表", description = "系统答不上来的问题，人工补答案后回灌知识库")
     @GetMapping("/flywheel")
     public ResponseEntity<?> flywheel(@RequestParam(defaultValue = "20") int limit) {
