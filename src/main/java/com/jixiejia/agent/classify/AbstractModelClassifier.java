@@ -2,12 +2,14 @@ package com.jixiejia.agent.classify;
 
 import com.jixiejia.agent.llm.LlmClients;
 import com.jixiejia.agent.llm.ModelCaller;
+import com.jixiejia.agent.llm.PromptLibrary;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.chat.client.ChatClient;
 import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.ObjectMapper;
 import tools.jackson.databind.json.JsonMapper;
 
+import java.util.Map;
 import java.util.Optional;
 
 /**
@@ -28,10 +30,9 @@ public abstract class AbstractModelClassifier {
 
     private static final ObjectMapper JSON = JsonMapper.builder().build();
 
-    private static final String SYSTEM_PROMPT = buildSystemPrompt();
-
     protected final LlmClients clients;
     protected final ModelCaller modelCaller;
+    protected final PromptLibrary prompts;
 
     /**
      * 本层的调用超时。
@@ -43,9 +44,11 @@ public abstract class AbstractModelClassifier {
      */
     protected final long timeoutMs;
 
-    protected AbstractModelClassifier(LlmClients clients, ModelCaller modelCaller, long timeoutMs) {
+    protected AbstractModelClassifier(LlmClients clients, ModelCaller modelCaller,
+                                      PromptLibrary prompts, long timeoutMs) {
         this.clients = clients;
         this.modelCaller = modelCaller;
+        this.prompts = prompts;
         this.timeoutMs = timeoutMs;
     }
 
@@ -81,7 +84,9 @@ public abstract class AbstractModelClassifier {
         user.append("用户当前这句话：").append(userText);
 
         try {
-            String raw = modelCaller.call(client(), SYSTEM_PROMPT, user.toString(), timeoutMs);
+            // 意图清单是运行时生成的，作为模板变量注入提示词文件
+            String system = prompts.get("intent-classifier", Map.of("intents", intentList()));
+            String raw = modelCaller.call(client(), system, user.toString(), timeoutMs);
             return parse(raw);
         } catch (Exception e) {
             // 兜底：解析或调用出任何意外都只意味着"这一层没结论"，不该影响整体路由
@@ -162,31 +167,19 @@ public abstract class AbstractModelClassifier {
         return s.length() <= 200 ? s : s.substring(0, 200) + "…";
     }
 
-    private static String buildSystemPrompt() {
+    /**
+     * 生成给模型看的意图清单（"名字：说明"逐行）。
+     *
+     * <p>这部分不能放进提示词文件：它必须和 {@link Intent} 枚举保持同步——
+     * 枚举加了一个意图、提示词里没列，模型就永远不会选它，而且不会报错。
+     * 所以清单从枚举生成，提示词文件里用 {@code {{intents}}} 占位。
+     */
+    private static String intentList() {
         StringBuilder sb = new StringBuilder();
-        sb.append("你是「机械家」二手工程机械平台（业务含设备买卖、出租、求租、需求询价、资讯、论坛）")
-                .append("的意图分类器。你的唯一任务是把用户这句话归到一个意图上。\n\n")
-                .append("可选意图如下，你只能返回下面出现过的名字：\n");
-
         for (Intent intent : Intent.values()) {
-            sb.append("- ").append(intent.name()).append("：").append(intent.description()).append("\n");
+            sb.append("- ").append(intent.name()).append("：")
+                    .append(intent.description()).append('\n');
         }
-
-        sb.append("""
-
-                规则：
-                1. 只输出一个 JSON 对象，不要输出任何别的内容：
-                   普通情况形如 {"intent":"CHUZU_QUERY","confidence":0.92}
-                   跨域时形如 {"intent":"CROSS_DOMAIN","confidence":0.9,"domains":["equipment","chuzu"]}
-                2. intent 必须是上面列表里的名字，不得自创，也不得输出 /reset 这类命令。
-                3. 一句话里同时问了两个及以上**不同领域**的问题时选 CROSS_DOMAIN，
-                   并在 domains 里列出涉及的领域。domains 的取值只能是：
-                   equipment(设备买卖) / chuzu(出租) / qiuzu(求租) / demand(用机需求询价) / news(资讯) / policy(平台规则/设备维修保养等知识)。
-                   注意 chuzu、qiuzu、demand 都属于"租赁"这一块业务，
-                   如果只问了其中一个，不算跨域。
-                4. 判断不了就选 UNKNOWN，并把 confidence 打到 0.3 以下，不要瞎猜。
-                5. confidence 是你对判断的把握，取值 0 到 1。
-                """);
-        return sb.toString();
+        return sb.toString().stripTrailing();
     }
 }

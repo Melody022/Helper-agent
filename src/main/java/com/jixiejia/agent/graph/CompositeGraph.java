@@ -4,6 +4,7 @@ import com.jixiejia.agent.agent.AgentContext;
 import com.jixiejia.agent.agent.AgentExecutor;
 import com.jixiejia.agent.llm.LlmClients;
 import com.jixiejia.agent.llm.ModelCaller;
+import com.jixiejia.agent.llm.PromptLibrary;
 import com.jixiejia.agent.router.AgentRegistry;
 import com.jixiejia.agent.tool.ToolRegistry;
 import jakarta.annotation.PostConstruct;
@@ -61,26 +62,14 @@ public class CompositeGraph {
     public record CompositeResult(String answer, List<String> agentKeys, int succeeded) {
     }
 
-    private static final String SYNTHESIS_SYSTEM = """
-            你是「机械家」二手工程机械平台的智能助手。
 
-            用户在一个问题里同时问了几个不同领域的事，平台各个领域的助手已经分别查到了资料。
-            你的任务是把这些资料**合并成一条连贯、好读的回答**，直接回答用户的问题。
-
-            必须遵守：
-            1. 只使用下面提供的资料。**绝对不要**补充资料里没有的设备、价格、租金、规则条款。
-            2. 某个领域没查到或查询失败时，如实说明那一部分暂时查不到，
-               不要用常识或对其它平台的印象去补。
-            3. 资料里的事实（价格、年份、小时数、地区、租金）原样保留，不要改写、不要换算、不要四舍五入。
-            4. 按用户提问的顺序组织回答。用户先问什么就先答什么。
-            5. 用口语，不要输出 JSON 或字段名，不要复述"资料显示"这类话。
-            """;
 
     private final AgentExecutor agentExecutor;
     private final AgentRegistry agentRegistry;
     private final ToolRegistry toolRegistry;
     private final LlmClients clients;
     private final ModelCaller modelCaller;
+    private final PromptLibrary prompts;
     private final ThreadPoolTaskExecutor chatExecutor;
 
     /** 单轮跨域最多并行跑几个域 */
@@ -96,6 +85,7 @@ public class CompositeGraph {
                           ToolRegistry toolRegistry,
                           LlmClients clients,
                           ModelCaller modelCaller,
+                          PromptLibrary prompts,
                           @Qualifier("chatExecutor") ThreadPoolTaskExecutor chatExecutor,
                           @Value("${routing.cross-domain.max-agents:3}") int maxAgents,
                           @Value("${routing.cross-domain.synthesis-timeout-ms:90000}") long synthesisTimeoutMs) {
@@ -104,6 +94,7 @@ public class CompositeGraph {
         this.toolRegistry = toolRegistry;
         this.clients = clients;
         this.modelCaller = modelCaller;
+        this.prompts = prompts;
         this.chatExecutor = chatExecutor;
         this.maxAgents = maxAgents;
         this.synthesisTimeoutMs = synthesisTimeoutMs;
@@ -243,7 +234,8 @@ public class CompositeGraph {
         String user = "用户的问题：" + state.message()
                 + "\n\n各领域助手查到的资料：\n" + String.join("\n\n", results);
 
-        String answer = modelCaller.call(clients.main(), SYNTHESIS_SYSTEM, user, synthesisTimeoutMs);
+        String answer = modelCaller.call(clients.main(),
+                prompts.get("composite-synthesis"), user, synthesisTimeoutMs);
 
         if (answer == null || answer.isBlank()) {
             // 综合这一步失败时，退回把各域结果原样拼接——信息是全的，只是不够顺

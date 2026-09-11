@@ -89,6 +89,41 @@ public class AuthService {
         tokenStore.revokeByUserId(userId);
     }
 
+    /**
+     * 修改自己的密码。
+     *
+     * <p>必须先验旧密码：能改密码和"已登录"是两回事——会话被人捡到、
+     * 或者用户忘了锁屏，都不该直接导致账号被改密码。
+     *
+     * <p>改完要把该用户的所有令牌踢下线，否则旧的登录态还能继续用。
+     *
+     * @return 旧密码不对或用户不存在时返回 false
+     */
+    public boolean changePassword(Long userId, String oldPassword, String newPassword) {
+        if (userId == null || newPassword == null || newPassword.length() < 6) {
+            return false;
+        }
+
+        AiUser user = userMapper.selectById(userId);
+        if (user == null) {
+            return false;
+        }
+        if (oldPassword == null || !passwordEncoder.matches(oldPassword, user.getPassword())) {
+            log.info("修改密码失败：原密码不正确，userId={}", userId);
+            return false;
+        }
+
+        AiUser update = new AiUser();
+        update.setId(userId);
+        update.setPassword(passwordEncoder.encode(newPassword));
+        userMapper.updateById(update);
+
+        // 改完密码必须让所有旧令牌失效，否则别处登录着的会话还能继续用
+        tokenStore.revokeByUserId(userId);
+        log.info("用户 {} 已修改密码，旧登录态全部失效", user.getUsername());
+        return true;
+    }
+
     /** 解析用户的角色标识集合。没有任何角色时给最小权限 USER，避免出现"无角色"这种未定义态。 */
     public Set<String> rolesOf(Long userId) {
         List<AiUserRole> links = userRoleMapper.selectList(

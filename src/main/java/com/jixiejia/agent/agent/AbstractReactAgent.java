@@ -1,6 +1,7 @@
 package com.jixiejia.agent.agent;
 
 import com.jixiejia.agent.llm.LlmClients;
+import com.jixiejia.agent.llm.PromptLibrary;
 import lombok.extern.slf4j.Slf4j;
 import org.bsc.langgraph4j.CompiledGraph;
 import org.bsc.langgraph4j.GraphStateException;
@@ -32,6 +33,8 @@ import java.util.stream.Collectors;
  * 编译出来的图是无状态的——每轮对话的状态通过输入 Map 传进去，
  * 所以可以安全地在并发请求间复用。缓存键里必须带工具集合，
  * 因为不同角色拿到的工具不同，用同一张图就等于绕过了白名单。
+ *
+ * <p>提示词不在代码里，见 {@link PromptLibrary}——改措辞不用动 Java。
  */
 @Slf4j
 public abstract class AbstractReactAgent implements BizAgent {
@@ -40,13 +43,23 @@ public abstract class AbstractReactAgent implements BizAgent {
     private final Map<String, CompiledGraph<MessagesState<Message>>> graphCache = new ConcurrentHashMap<>();
 
     protected final LlmClients clients;
+    protected final PromptLibrary prompts;
 
-    protected AbstractReactAgent(LlmClients clients) {
+    protected AbstractReactAgent(LlmClients clients, PromptLibrary prompts) {
         this.clients = clients;
+        this.prompts = prompts;
     }
 
-    /** 本 Agent 的系统提示词。 */
-    protected abstract String systemPrompt();
+    /**
+     * 本 Agent 的提示词在 {@code classpath:prompts/} 下的文件名（不含 .md）。
+     * 公开出来是为了让运维/管理台能直接看到"这个 Agent 用的是哪个提示词文件"。
+     */
+    public abstract String promptKey();
+
+    /** 本 Agent 的系统提示词，从提示词库读取。 */
+    protected String systemPrompt() {
+        return prompts.get(promptKey());
+    }
 
     /** 执行失败时的兜底话术。 */
     protected String fallbackReply() {

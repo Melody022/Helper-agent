@@ -1,5 +1,6 @@
 package com.jixiejia.agent.api;
 
+import com.jixiejia.agent.api.dto.ChangePasswordRequest;
 import com.jixiejia.agent.api.dto.LoginRequest;
 import com.jixiejia.agent.api.dto.LoginResponse;
 import com.jixiejia.agent.api.dto.UserInfo;
@@ -70,5 +71,24 @@ public class AuthController {
                     .body(Map.of("code", 401, "message", "未登录"));
         }
         return ResponseEntity.ok(UserInfo.of(user));
+    }
+
+    @Operation(summary = "修改密码",
+            description = "需要提供原密码。改完所有登录态会失效，需要重新登录")
+    @PostMapping("/password")
+    public ResponseEntity<?> changePassword(@Valid @RequestBody ChangePasswordRequest request) {
+        CurrentUser user = AuthContext.get();
+        if (user == null) {
+            return ResponseEntity.status(HttpStatus.UNAUTHORIZED)
+                    .body(Map.of("code", 401, "message", "未登录"));
+        }
+
+        // 统一返回这一句，不区分"原密码错"和"新密码不合规"，避免给爆破者反馈
+        if (!authService.changePassword(user.userId(), request.oldPassword(), request.newPassword())) {
+            return ResponseEntity.badRequest()
+                    .body(Map.of("code", 400, "message", "原密码不正确，或新密码不符合要求（至少 6 位）"));
+        }
+        return ResponseEntity.ok(Map.of("code", 200,
+                "message", "密码已修改。为保证安全，之前的登录状态已全部失效，请重新登录。"));
     }
 }

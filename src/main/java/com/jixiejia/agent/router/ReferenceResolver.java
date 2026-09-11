@@ -2,6 +2,7 @@ package com.jixiejia.agent.router;
 
 import com.jixiejia.agent.llm.LlmClients;
 import com.jixiejia.agent.llm.ModelCaller;
+import com.jixiejia.agent.llm.PromptLibrary;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
@@ -41,20 +42,11 @@ public class ReferenceResolver {
             "这个", "那个", "这些", "那些", "这种", "那种",
             "这台", "那台", "这几台", "那几台", "它", "它们", "上面说的", "刚才说的");
 
-    private static final String SYSTEM_PROMPT = """
-            你在帮一个二手工程机械平台的客服系统做指代消解。
 
-            用户最后一句里用了"这个""那台""还有吗"这类指代的说法，
-            请结合前面的对话，把它改写成一句不依赖上下文也能看懂的完整问题。
-
-            要求：
-            1. 只输出改写后的那一句话，不要解释，不要加引号，不要输出多行。
-            2. 保持用户原本的意图和语气，不要替他补充他没说过的具体条件。
-            3. 如果确实无法判断指代的是什么，就原样输出用户最后那句话。
-            """;
 
     private final LlmClients clients;
     private final ModelCaller modelCaller;
+    private final PromptLibrary prompts;
 
     /** 改写超时。本地小模型首次调用要加载模型，给足余量 */
     private static final long TIMEOUT_MS = 30_000L;
@@ -94,7 +86,8 @@ public class ReferenceResolver {
 
         String user = "对话历史：\n" + recentTurns + "\n用户最后一句：" + text;
         // 本地小模型冷启动慢，改写这种小任务也别用默认的 8 秒
-        String rewritten = modelCaller.call(clients.small(), SYSTEM_PROMPT, user, TIMEOUT_MS);
+        String rewritten = modelCaller.call(clients.small(), prompts.get("reference-resolution"),
+                user, TIMEOUT_MS);
 
         if (rewritten == null || rewritten.isBlank()) {
             log.debug("指代消解改写失败，按原文处理：{}", text);

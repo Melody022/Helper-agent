@@ -2,6 +2,7 @@ package com.jixiejia.agent.rag;
 
 import com.jixiejia.agent.llm.LlmClients;
 import com.jixiejia.agent.llm.ModelCaller;
+import com.jixiejia.agent.llm.PromptLibrary;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
@@ -28,6 +29,11 @@ import java.util.List;
  *
  * <p>自评用小模型（本地 Ollama）而不是主模型，一是省，二是这是"判别型"任务，
  * 小模型够用。判错的代价只是多拒答一次，比让它蒙混过去安全。
+ *
+ * <p>三段提示词都在 {@code classpath:prompts/} 下，改措辞不用动 Java：
+ * {@code knowledge-generation}（生成回答）、{@code knowledge-self-eval}（自评）。
+ * 自评那段提示词踩过坑——原来写成"出现资料中没有的数字就判否"，
+ * 反而暗示模型"看到数字就否"，把正确回答误杀了；现在改成"逐条核对 + 给正例"。
  */
 @Slf4j
 @Service
@@ -42,49 +48,12 @@ public class KnowledgeAnswerService {
     private static final String SELF_EVAL_FAIL_REPLY =
             "我找到的资料不足以完整回答这个问题，为了避免给你错误信息，建议你回复\"转人工\"让客服确认。";
 
-    private static final String GENERATION_SYSTEM = """
-            你是「机械家」二手工程机械平台的客服知识助手。
-
-            下面会给你若干条平台资料，请**只根据这些资料**回答用户的问题。
-
-            必须遵守：
-            1. 只使用资料里写明的内容。资料没提到的，不要用常识或对其它平台的印象补充。
-            2. 如果资料只能部分回答，就只答能答的部分，并说明哪部分资料里没有。
-            3. 资料之间说法不一致时如实指出，不要替平台下结论。
-            4. 回答口语化、简洁，直接回答用户问的，不要复述"资料说""根据资料"这类话。
-            5. 不要输出 JSON 或字段名。
-            """;
-
-    /**
-     * 自评提示词。
-     *
-     * <p>措辞踩过一次坑：原来写的是"如果回答里出现了资料中没有的具体数字、比例、时限，
-     * 判为否"——本意是让它核对数字，实际效果却是暗示它"看到数字就判否"。
-     * 实测中一个完全正确、数字全部来自资料的回答被误判成不合格，
-     * 用户明明能得到答案，却被告知"资料不足，请转人工"。
-     *
-     * <p>改成"逐条核对 + 给正例"，让它先去找依据，而不是先怀疑。
-     */
-    private static final String SELF_EVAL_SYSTEM = """
-            你在核对一段客服回答是否忠于给定资料。
-
-            下面会给你【资料】和基于资料写出的【回答】。
-            请逐条核对回答里的具体信息——尤其是数字、比例、金额、时限、条款——
-            是否都能在资料里找到出处。
-
-            判断标准：
-            - 每一条信息都能在资料里找到依据 → 输出：是
-            - 有任何一条在资料里找不到，或者与资料矛盾 → 输出：否
-
-            资料里有数字而回答也用了同样的数字，算「有依据」，判「是」。
-            只输出一个字：是 或 否。不要解释。
-            """;
-
     private final KnowledgeRetriever retriever;
     private final EvidenceGate evidenceGate;
     private final FlywheelService flywheelService;
     private final LlmClients clients;
     private final ModelCaller modelCaller;
+    private final PromptLibrary prompts;
 
     @Value("${rag.retrieval.top-k:5}")
     private int topK;
@@ -173,7 +142,8 @@ public class KnowledgeAnswerService {
 
         String user = "资料：\n" + sources + "\n用户的问题：" + question;
         // 生成要读完资料再写一整段，且主模型是推理型，必须给足时间
-        return modelCaller.call(clients.main(), GENERATION_SYSTEM, user, generationTimeoutMs);
+        return modelCaller.call(clients.main(), prompts.get("knowledge-generation"),
+                user, generationTimeoutMs);
     }
 
     /**
@@ -189,7 +159,8 @@ public class KnowledgeAnswerService {
         }
         String user = "【资料】\n" + sources + "\n【回答】\n" + answer + "\n\n回答是否完全基于资料？只答 是 或 否。";
 
-        String verdict = modelCaller.call(clients.small(), SELF_EVAL_SYSTEM, user, selfEvalTimeoutMs);
+        String verdict = modelCaller.call(clients.small(), prompts.get("knowledge-self-eval"),
+                user, selfEvalTimeoutMs);
         if (verdict == null || verdict.isBlank()) {
             // 自评是第二道保险，不该因为本地模型没启动就把正常问答全拒掉
             log.debug("自评模型不可用，默认放行");

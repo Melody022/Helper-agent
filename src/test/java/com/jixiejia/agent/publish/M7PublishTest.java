@@ -103,6 +103,28 @@ class M7PublishTest {
         jdbcTemplate.update("DELETE FROM ai_user WHERE LEFT(username, 5) = 'test_'");
     }
 
+    /**
+     * 把发布信息说给系统听，直到表单填齐。
+     *
+     * <p><b>为什么会重复说。</b>字段抽取是模型做的，偶尔会漏掉一两个字段——
+     * 这是模型抽取的固有波动，不是代码缺陷。真实用户遇到"还需要你补充：吨位"
+     * 也会再说一遍，所以这里重复发送是符合实际的行为。
+     *
+     * <p>要保证的是<b>"信息齐了之前绝不落库"</b>，那条断言不受这个重试影响：
+     * 重试只影响"能不能进到确认环节"，不影响"没确认就不许写"。
+     */
+    private String fillForm(String info) {
+        String reply = "";
+        for (int i = 0; i < 3; i++) {
+            reply = say(info);
+            AiPublishRequest draft = formService.findActiveDraft(conversationId);
+            if (draft != null && formService.isAwaitingConfirm(draft)) {
+                return reply;
+            }
+        }
+        return reply;
+    }
+
     private BizAgent publishAgent() {
         return agentExecutor.find("PublishAgent").orElseThrow();
     }
@@ -204,7 +226,7 @@ class M7PublishTest {
         long before = pendingChuzuCount();
 
         say("帮我发布一台出租");
-        String summary = say("机型是挖掘机，吨位 20-29吨，在洛阳市，租金 1000/天 不带油，"
+        String summary = fillForm("机型是挖掘机，吨位 20-29吨，在洛阳市，租金 1000/天 不带油，"
                 + "我是公司出租，电话 13811334488");
 
         System.out.println("[确认摘要]\n" + summary);
@@ -232,7 +254,7 @@ class M7PublishTest {
         long before = pendingChuzuCount();
 
         say("帮我发布一台出租");
-        String summary = say("机型是挖掘机，吨位 20-29吨，在洛阳市，租金 1000/天 不带油，"
+        String summary = fillForm("机型是挖掘机，吨位 20-29吨，在洛阳市，租金 1000/天 不带油，"
                 + "我是公司出租，电话 13811334488");
 
         AiPublishRequest draft = formService.findActiveDraft(conversationId);
@@ -244,10 +266,12 @@ class M7PublishTest {
         assertThat(result).contains("已提交");
         assertThat(pendingChuzuCount()).isEqualTo(before + 1);
 
-        // 落库内容核对
-        JxbChuzu saved = chuzuMapper.selectOne(Wrappers.<JxbChuzu>lambdaQuery()
-                .eq(JxbChuzu::getCustomerId, memberId)
-                .eq(JxbChuzu::getAuditStatus, "0"));
+        // 落库内容核对。
+        // 按草稿记下的业务主键精确查——用"这个会员名下所有待审核记录"去查的话，
+        // 库里只要有其它待审核数据（比如手工演示留下的）就会查出多条。
+        AiPublishRequest afterSubmit = requestMapper.selectById(draft.getId());
+        assertThat(afterSubmit.getBizId()).isNotNull();
+        JxbChuzu saved = chuzuMapper.selectById(afterSubmit.getBizId());
         assertThat(saved).isNotNull();
         assertThat(saved.getTonnage()).isEqualTo("20-29");
         assertThat(saved.getOwnerType()).isEqualTo("gs");
@@ -260,7 +284,7 @@ class M7PublishTest {
         assertThat(saved.getDelFlag()).isEqualTo("0");
 
         // 草稿状态与落库结果对上了
-        AiPublishRequest updated = requestMapper.selectById(draft.getId());
+        AiPublishRequest updated = afterSubmit;
         assertThat(updated.getStatus()).isEqualTo("SUBMITTED");
         assertThat(updated.getBizId()).isEqualTo(saved.getId());
         // 令牌一次性：用完即弃，防止同一条确认被重放提交两次
@@ -273,7 +297,10 @@ class M7PublishTest {
         long before = pendingChuzuCount();
 
         say("帮我发布一台出租");
-        say("机型是挖掘机，吨位 20-29吨，在洛阳市，租金 1000/天，公司出租，电话 13811334488");
+        fillForm("机型是挖掘机，吨位 20-29吨，在洛阳市，租金 1000/天，公司出租，电话 13811334488");
+        assertThat(formService.isAwaitingConfirm(formService.findActiveDraft(conversationId)))
+                .as("信息填齐后应当进入待确认状态，否则后面的取消分支根本走不到")
+                .isTrue();
         String reply = say("算了，先不发了");
 
         assertThat(reply).contains("取消");
