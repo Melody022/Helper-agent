@@ -94,6 +94,16 @@ public class KeywordWeightClassifier {
         double runnerUp = scored.ranked().size() > 1 ? scored.ranked().get(1).getValue() : 0.0;
         String hitText = String.join("、", scored.hits().get(top.getKey()));
 
+        // 动作意图（发布）优先于查询意图：用户说"帮我发布一台出租"要的是发布流程，
+        // 不该被"出租"这个词抢到出租查询上。实测评估里就是这么错判的。
+        Optional<Intent> action = dominantActionIntent(scored);
+        if (action.isPresent()) {
+            String actionHits = String.join("、", scored.hits().getOrDefault(action.get(), List.of()));
+            log.debug("关键词层定案（动作意图优先）：{} 命中 [{}]", action.get(), actionHits);
+            return Optional.of(IntentResult.of(action.get(), highWeight,
+                    ClassifyLayer.KEYWORD, "命中发布意图关键词：" + actionHits));
+        }
+
         if (top.getValue() >= highWeight && top.getValue() > runnerUp) {
             log.debug("关键词层定案：{} 命中 [{}]", top.getKey(), hitText);
             return Optional.of(IntentResult.of(top.getKey(), top.getValue(),
@@ -123,25 +133,43 @@ public class KeywordWeightClassifier {
      * 跨域判定专用：阈值就取本类的高权重，避免调用方再抄一份数字。
      */
     public List<Intent> highWeightIntents(String text) {
-        return matchedIntents(text, highWeight);
-    }
-
-    /**
-     * 列出所有得分不低于 minWeight 的意图，按得分降序。
-     *
-     * <p>给跨域判定用：它关心的是"这句话同时指向了几个领域"，而不是"最像哪一个"，
-     * 所以不能只看 top-1。返回顺序即强弱顺序，调用方据此在超出上限时截断。
-     *
-     * <p>注意 CROSS_DOMAIN 本身会被跳过——它是判定结果，不是候选。
-     */
-    public List<Intent> matchedIntents(String text, double minWeight) {
         if (text == null || text.isBlank()) {
             return List.of();
         }
-        return score(text).ranked().stream()
-                .filter(e -> e.getValue() >= minWeight)
+        Scored scored = score(text);
+
+        // 动作意图一旦命中就独占，不再算跨域：
+        // 否则"帮我发布一台出租"会同时命中发布和出租，被判成跨域、
+        // 触发一次毫无意义的综合（用户要的是发布流程，不是把两边的查询结果拼起来）
+        Optional<Intent> action = dominantActionIntent(scored);
+        if (action.isPresent()) {
+            return List.of(action.get());
+        }
+
+        return scored.ranked().stream()
+                .filter(e -> e.getValue() >= highWeight)
                 .filter(e -> e.getKey() != Intent.UNKNOWN && e.getKey() != Intent.CROSS_DOMAIN)
                 .map(Map.Entry::getKey)
                 .toList();
+    }
+
+    /**
+     * 找出已定案的动作型意图（发布类）。
+     *
+     * <p>两个发布意图可能同时命中（"我要发布求租"既含"我要发布"也含"发布求租"），
+     * 这时取<b>匹配词更长</b>的那个——"发布求租"比笼统的"发布"更具体，更可信。
+     */
+    private Optional<Intent> dominantActionIntent(Scored scored) {
+        return scored.ranked().stream()
+                .filter(e -> e.getKey().isActionIntent() && e.getValue() >= highWeight)
+                .max(Comparator.comparingInt(e -> longestHit(scored, e.getKey())))
+                .map(Map.Entry::getKey);
+    }
+
+    private static int longestHit(Scored scored, Intent intent) {
+        return scored.hits().getOrDefault(intent, List.of()).stream()
+                .mapToInt(String::length)
+                .max()
+                .orElse(0);
     }
 }
