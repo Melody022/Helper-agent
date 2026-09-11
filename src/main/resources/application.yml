@@ -98,6 +98,16 @@ springdoc:
     path: /swagger-ui.html
   default-produces-media-type: application/json
 
+# 鉴权：Agent 必须登录后才能使用；管理员与普通用户分角色
+ai:
+  auth:
+    # 登录令牌有效期（小时），默认 7 天
+    token-ttl-hours: ${AI_TOKEN_TTL_HOURS:168}
+    # 初始管理员：仅当库里一个 ADMIN 都没有时才会创建
+    init-admin-username: ${AI_INIT_ADMIN_USERNAME:admin}
+    # 留空则随机生成并打印到启动日志，避免把默认口令写死在配置里
+    init-admin-password: ${AI_INIT_ADMIN_PASSWORD:}
+
 # 会话与记忆
 ai-session:
   title: "你好，我是机械家AI助手"

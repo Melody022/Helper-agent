@@ -20,6 +20,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.boot.test.context.SpringBootTest;
 
 import java.util.Set;
@@ -77,6 +78,9 @@ class M4RouterTest {
     @Autowired
     private AiUserMapper aiUserMapper;
 
+    @Autowired
+    private JdbcTemplate jdbcTemplate;
+
     /** 路由要求必须登录，所以每个用例都得有一个真实可用的账号 */
     private Long testUserId;
 
@@ -97,6 +101,10 @@ class M4RouterTest {
             aiUserMapper.deleteById(testUserId);
             testUserId = null;
         }
+        // 测试账号必须物理删除：MyBatis-Plus 的 deleteById 走的是 @TableLogic 逻辑删除，
+        // 只把 del_flag 置成 '2'，行还留在表里，跑几十轮就是一屏垃圾数据。
+        jdbcTemplate.update("DELETE FROM ai_user WHERE LEFT(username, 5) = 'test_'");
+
         // 测试往真实库里写了会话/消息/审计，按 test- 前缀清干净，别污染开发数据
         auditLogMapper.delete(Wrappers.<AiAuditLog>lambdaQuery()
                 .likeRight(AiAuditLog::getConversationId, TEST_CONVERSATION_PREFIX));

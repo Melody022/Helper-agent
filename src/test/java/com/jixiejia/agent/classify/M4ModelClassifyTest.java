@@ -18,6 +18,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.boot.test.context.SpringBootTest;
 
 import java.util.UUID;
@@ -49,6 +50,9 @@ class M4ModelClassifyTest {
     private AiUserMapper aiUserMapper;
 
     @Autowired
+    private JdbcTemplate jdbcTemplate;
+
+    @Autowired
     private AiAuditLogMapper auditLogMapper;
 
     @Autowired
@@ -76,6 +80,7 @@ class M4ModelClassifyTest {
             aiUserMapper.deleteById(testUserId);
             testUserId = null;
         }
+        jdbcTemplate.update("DELETE FROM ai_user WHERE LEFT(username, 5) = 'test_'");
         auditLogMapper.delete(Wrappers.<AiAuditLog>lambdaQuery()
                 .likeRight(AiAuditLog::getConversationId, TEST_CONVERSATION_PREFIX));
         messageMapper.delete(Wrappers.<AiMessage>lambdaQuery()
