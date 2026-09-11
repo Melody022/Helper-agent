@@ -1,6 +1,7 @@
 package com.jixiejia.agent.llm;
 
 import org.springframework.ai.chat.client.ChatClient;
+import org.springframework.ai.chat.model.ChatModel;
 import org.springframework.ai.ollama.OllamaChatModel;
 import org.springframework.ai.openai.OpenAiChatModel;
 import org.springframework.stereotype.Component;
@@ -22,10 +23,12 @@ public class LlmClients {
 
     private final ChatClient mainClient;
     private final ChatClient smallClient;
+    private final ChatModel mainModel;
 
     public LlmClients(OpenAiChatModel mainChatModel, OllamaChatModel smallChatModel) {
         this.mainClient = ChatClient.create(mainChatModel);
         this.smallClient = ChatClient.create(smallChatModel);
+        this.mainModel = mainChatModel;
     }
 
     /** 主模型客户端（MIMO）。 */
@@ -36,5 +39,13 @@ public class LlmClients {
     /** 小模型客户端（本地 Ollama）。 */
     public ChatClient small() {
         return smallClient;
+    }
+
+    /**
+     * 主模型本体。LangGraph4j 的 ReAct 图要求传 {@link ChatModel} 而不是 ChatClient，
+     * 因为它要在图内部自己组织消息序列和工具调用循环。
+     */
+    public ChatModel mainModel() {
+        return mainModel;
     }
 }

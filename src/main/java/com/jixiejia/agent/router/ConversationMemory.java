@@ -7,6 +7,9 @@ import com.jixiejia.agent.persistence.mapper.ai.AiConversationMapper;
 import com.jixiejia.agent.persistence.mapper.ai.AiMessageMapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.ai.chat.messages.AssistantMessage;
+import org.springframework.ai.chat.messages.Message;
+import org.springframework.ai.chat.messages.UserMessage;
 import org.springframework.stereotype.Component;
 
 import java.math.BigDecimal;
@@ -79,6 +82,27 @@ public class ConversationMemory {
         save(conversationId, "user", content, null, null, null, null);
     }
 
+    /**
+     * 取最近若干轮对话，转成 Spring AI 的消息列表，供 Agent 构图时作为历史。
+     *
+     * <p>调用方必须在保存本轮用户消息<b>之前</b>调用，否则当前这句会被当成历史重复一次。
+     */
+    public List<Message> recentMessagesForModel(String conversationId, int rounds) {
+        List<AiMessage> rows = recentMessages(conversationId, Math.max(1, rounds) * 2);
+        List<Message> result = new ArrayList<>(rows.size());
+        for (AiMessage m : rows) {
+            String content = m.getContent();
+            if (content == null || content.isBlank()) {
+                continue;
+            }
+            if ("user".equals(m.getRole())) {
+                result.add(new UserMessage(content));
+            } else if ("assistant".equals(m.getRole())) {
+                result.add(new AssistantMessage(content));
+            }
+        }
+        return result;
+    }
     /** 记录一条助手消息，附带本轮的路由结果。 */
     public void saveAssistantMessage(String conversationId, String content, String intent,
                                      Double confidence, String agentKey, Integer latencyMs) {
