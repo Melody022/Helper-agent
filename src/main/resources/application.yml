@@ -1,0 +1,138 @@
+server:
+  port: ${APP_PORT:8082}
+  tomcat:
+    uri-encoding: UTF-8
+
+spring:
+  application:
+    name: jxj-ai-agent
+
+  # Spring Boot 4.x 下 spring-dotenv 不再生效，改用原生 config data 导入 .env；
+  # optional 表示文件缺失时不阻断启动；相对路径基于进程工作目录（项目根目录）。
+  # 注意：导入的属性优先级低于 OS 环境变量(systemEnvironment)。
+  config:
+    import: optional:file:.env[.properties]
+
+  profiles:
+    active: dev
+
+  datasource:
+    url: ${DB_URL:jdbc:mysql://127.0.0.1:3306/jxj?useUnicode=true&characterEncoding=UTF-8&serverTimezone=Asia/Shanghai}
+    username: ${DB_USERNAME:root}
+    password: ${DB_PASSWORD:}
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    hikari:
+      # 业务表（jxb_*/cms_*/ums_*）只读直查 + ai_* 表读写
+      maximum-pool-size: 10
+      minimum-idle: 2
+      connection-timeout: 10000
+
+  data:
+    redis:
+      host: ${REDIS_HOST:127.0.0.1}
+      port: ${REDIS_PORT:6379}
+      password: ${REDIS_PASSWORD:}
+      database: 0
+      timeout: 3000
+
+  elasticsearch:
+    uris: ${ES_URIS:http://localhost:9200}
+    username: ${ES_USERNAME:}
+    password: ${ES_PASSWORD:}
+
+  jackson:
+    default-property-inclusion: non_null
+    time-zone: Asia/Shanghai
+
+  # 主聊天模型 = MIMO（OpenAI 兼容）
+  ai:
+    openai:
+      base-url: ${MIMO_BASE_URL:https://api.xiaomimimo.com/v1}
+      api-key: ${MIMO_API_KEY:}
+      chat:
+        options:
+          model: ${MIMO_MODEL:mimo-v2.5}
+      # Embedding = DashScope text-embedding-v4（覆盖 base-url / key）
+      embedding:
+        base-url: ${EMBEDDING_BASE_URL:https://dashscope.aliyuncs.com/compatible-mode/v1}
+        api-key: ${DASHSCOPE_API_KEY:}
+        options:
+          model: text-embedding-v4
+
+mybatis-plus:
+  configuration:
+    map-underscore-to-camel-case: true
+    # 刻意不开 StdOutImpl：它会把每条 SQL 的完整结果集打到控制台，
+    # 启动时载入 3869 条区划 + 438 条字典就是几千行刷屏。
+    # 排查 SQL 时改用 logging.level.com.jixiejia.agent.persistence.mapper.jxj: debug
+  global-config:
+    db-config:
+      # 刻意不配 logic-delete-field：jxj 业务表虽然也有 del_flag，但语义与 ai_* 表不同
+      #   - ai_* 表：'0'=存在 '2'=删除（V1 脚本约定）
+      #   - jxb_chuzu/jxb_qiuzu 等活动行 del_flag 是空串或 NULL，被删行才是 '1'
+      #     若在此全局开启，MyBatis-Plus 会补 `del_flag='0'`，14 条在租记录会被整体过滤掉。
+      # 因此改为：ai_* 实体各自标注 @TableLogic，业务表一律在 BizFilters 里显式写明过滤条件。
+      logic-delete-value: 2
+      logic-not-delete-value: 0
+  mapper-locations: classpath*:/mapper/**/*.xml
+
+springdoc:
+  api-docs:
+    path: /v3/api-docs
+  swagger-ui:
+    path: /swagger-ui.html
+  default-produces-media-type: application/json
+
+# 模型与服务端点（多 provider 动态路由用）
+ai-model:
+  mimo:
+    base-url: ${MIMO_BASE_URL:https://api.xiaomimimo.com/v1}
+    api-key: ${MIMO_API_KEY:}
+    model: ${MIMO_MODEL:mimo-v2.5}
+  # 第 2 层小模型意图识别：本地 Ollama
+  small:
+    base-url: ${OLLAMA_BASE_URL:http://localhost:11434/v1}
+    model: ${OLLAMA_MODEL:qwen2.5:7b}
+    api-key: ${OLLAMA_API_KEY:}
+
+# 会话与记忆
+ai-session:
+  title: "你好，我是机械家AI助手"
+  describe: "机械家的智能客服/导购助手，可以帮你找设备、查出租求租、查需求询价、看行业资讯，也可以帮你在平台发布出租/求租。"
+  examples:
+    - "有没有二手的挖掘机？"
+    - "附近有挖掘机出租吗？"
+    - "在平台租设备的流程和押金怎么算？"
+    - "现在有哪些设备需求或询价？"
+    - "帮我发布一台出租"
+
+# 路由链（7 步短路）：身份 → 命令 → 会话粘性 → 指代消解 → 三层意图 → Agent 匹配 → 审计
+routing:
+  enabled: ${AI_INTENT_ROUTING_ENABLED:true}
+  sticky:
+    enabled: true
+    ttl-minutes: ${AI_STICKY_TTL_MINUTES:30}
+  keyword:
+    high-weight: 0.9
+    mid-weight: 0.7
+
+# RAG（M6/M8 使用）
+rag:
+  embedding-dimensions: ${RAG_EMBEDDING_DIMENSIONS:1024}
+  evidence-gate:
+    enabled: true
+    min-retrieval-score: ${RAG_MIN_RETRIEVAL_SCORE:0.6}
+    min-evidence-count: ${RAG_MIN_EVIDENCE_COUNT:1}
+
+# 观测与成本
+langfuse:
+  host: ${LANGFUSE_HOST:http://localhost:3000}
+  public-key: ${LANGFUSE_PUBLIC_KEY:}
+  secret-key: ${LANGFUSE_SECRET_KEY:}
+  enabled: ${LANGFUSE_ENABLED:false}
+
+logging:
+  level:
+    root: info
+    com.jixiejia.agent: debug
+    org.bsc.langgraph4j: info
