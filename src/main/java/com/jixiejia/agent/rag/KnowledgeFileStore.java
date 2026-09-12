@@ -108,6 +108,10 @@ public class KnowledgeFileStore {
     /**
      * 把原件落盘。
      *
+     * <p>⚠️ 它保证的是"<b>同一份内容</b>不会堆第二份"，不是"不会有任何堆积"——
+     * 内容不同的文件（比如连着传了好几份解析失败的坏文件）各自是独立文件。
+     * 调用方在驳回上传时要自己把落下来的文件清掉（见 AdminKnowledgeController.upload）。
+     *
      * @param sourceId 内容指纹，同时用作文件名（天然去重）
      * @param ext      扩展名，可为空；含非字母数字会被当成"没有扩展名"（见 {@link #safeExtension}）
      * @return 落盘的相对路径（存进 {@code ai_knowledge_doc.file_path}）
@@ -143,6 +147,21 @@ public class KnowledgeFileStore {
             throw new IllegalArgumentException("文件路径越界：" + relativePath);
         }
         return resolved;
+    }
+
+    /**
+     * 删掉一份落盘的原件。<b>失败只记日志，绝不抛异常</b>——
+     * 它只在"这次上传已经被驳回"的清理路径上调用，清理失败也不该改变对被驳回这件事的结论。
+     */
+    public void deleteQuietly(String relativePath) {
+        if (relativePath == null || relativePath.isBlank()) {
+            return;
+        }
+        try {
+            Files.deleteIfExists(resolve(relativePath));
+        } catch (Exception e) {
+            log.warn("清理原件失败（{}）：{}", relativePath, e.getMessage());
+        }
     }
 
     /**

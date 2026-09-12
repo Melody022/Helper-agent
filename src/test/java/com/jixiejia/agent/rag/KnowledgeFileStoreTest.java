@@ -105,4 +105,20 @@ class KnowledgeFileStoreTest {
         assertThatThrownBy(() -> store.convertOfficeToPdf("upload-x", "../../etc/passwd"))
                 .isInstanceOf(IllegalArgumentException.class);
     }
+
+    @Test
+    @DisplayName("deleteQuietly 删得掉已落盘的文件，删不存在的也不抛异常")
+    void deleteQuietlyRemovesStoredFile(@TempDir Path dir) throws Exception {
+        KnowledgeFileStore store = new KnowledgeFileStore(dir.toString());
+        String name = store.store("upload-del", "txt", CONTENT);
+        assertThat(store.resolve(name)).exists();
+
+        store.deleteQuietly(name);
+        assertThat(store.resolve(name)).doesNotExist();
+
+        // 再删一次、传 null、传空串：都只是记日志，不抛
+        store.deleteQuietly(name);
+        store.deleteQuietly(null);
+        store.deleteQuietly("");
+    }
 }

@@ -103,6 +103,7 @@ public class AdminKnowledgeController {
             return ResponseEntity.badRequest().body(Map.of("code", 400, "message", "请选择要上传的文件"));
         }
 
+        String filePath = null;
         try {
             byte[] bytes = file.getBytes();
             String filename = file.getOriginalFilename();
@@ -112,13 +113,20 @@ public class AdminKnowledgeController {
             // 落盘文件名也用同一个指纹，于是"重复上传"连文件都不会堆第二份。
             String sourceId = "upload-" + TextChunker.sha256(bytes).substring(0, 16);
 
-            // 先把原件落下来。解析要花多久是解析的事，"这份文件传过"这个事实先固化——
-            // 后面无论哪一步失败，原件都还在磁盘上，能拿来排查、也能重新入库。
-            String filePath = fileStore.store(sourceId, ext, bytes);
+            // 先把原件落下来。解析要花多久是解析的事，"这份文件传过"这个事实先固化。
+            //
+            // ⚠️ 指纹去重只保证"重传同一份不会堆第二份"，**不保证失败路径不留孤儿**：
+            // 每份内容不同的坏文件都是一个新文件名，且没有任何 DB 行引用它。
+            // 所以下面两条"驳回"路径（解析失败、没解析出内容）会把刚落的原件删掉——
+            // 上传都被驳回了，用户手里还有原文件，磁盘上留个没人引用的副本只会越积越多。
+            // 入库失败（500）那条路径**故意不删**：文档行已经建了（FAILED），
+            // 留着原件能让人工重试和排查。
+            filePath = fileStore.store(sourceId, ext, bytes);
 
             ParsedDocument parsed = documentParser.parse(filename, bytes);
 
             if (parsed.text().isBlank() && parsed.tables().isEmpty()) {
+                fileStore.deleteQuietly(filePath);
                 return ResponseEntity.badRequest().body(Map.of("code", 400,
                         "message", "这份文档没有解析出任何文字内容"
                                 + (parsed.warnings().isEmpty() ? "" : "：" + String.join("；", parsed.warnings()))));
@@ -129,6 +137,8 @@ public class AdminKnowledgeController {
 
             int chunks = ingestionService.ingestUpload(sourceId, docTitle, parsed);
             if (chunks < 0) {
+                // 已知边界：这条"跳过"路径不刷新 fileName——先传"国标.pdf"、改名"GB-2022.pdf"
+                // 再传同一份内容，被判跳过，DB 里的 fileName 仍停在旧名字。影响极小（仅列表展示），暂不改。
                 return ResponseEntity.ok(Map.of("code", 200, "message",
                         "这份文档内容和库里已有的完全一致，已跳过（没有重复入库）"));
             }
@@ -161,6 +171,7 @@ public class AdminKnowledgeController {
         } catch (DocumentParseException e) {
             // 解析类失败是"用户能看懂并自己修"的（格式不支持、没装 LibreOffice、页数超限），
             // 用 400 而不是 500
+            fileStore.deleteQuietly(filePath);
             return ResponseEntity.badRequest().body(Map.of("code", 400, "message", e.getMessage()));
         } catch (Exception e) {
             log.error("上传入库失败", e);
