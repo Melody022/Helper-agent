@@ -26,7 +26,7 @@ public class AiTool {
     /** 工具名，即 @Tool(name)，全局唯一 */
     private String toolName;
 
-    /** 能力标识 equipment/chuzu/qiuzu/demand/news */
+    /** 能力标识 equipment/chuzu/qiuzu/news */
     private String capability;
 
     private String displayName;

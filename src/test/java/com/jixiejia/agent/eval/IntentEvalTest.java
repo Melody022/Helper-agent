@@ -73,16 +73,19 @@ class IntentEvalTest {
             new Sample("挖掘机出租一天多少钱", Intent.CHUZU_QUERY),
             new Sample("6吨以下的小挖好租吗", Intent.CHUZU_QUERY),
 
-            // ================= 求租（我是机主，找活干）=================
+            // ================= 求租（"有人要租设备"：机主看这些找活）=================
             new Sample("哪里有求租的", Intent.QIUZU_QUERY),
             new Sample("我有台挖机想找活干", Intent.QIUZU_QUERY),
             new Sample("工地上有没有活干", Intent.QIUZU_QUERY),
             new Sample("想给机器找个长期活", Intent.QIUZU_QUERY),
 
-            // ================= 用机需求 / 询价 =================
-            new Sample("现在有哪些设备需求", Intent.DEMAND_QUERY),
-            new Sample("平台上有人要买新机吗", Intent.DEMAND_QUERY),
-            new Sample("最近有哪些用机需求", Intent.DEMAND_QUERY),
+            // ================= 求租（含原来的"用机需求"）=================
+            // "需求"和"求租"在平台上是同一个东西（jxb_qiuzu 装的就是"要租机器的人发的需求"），
+            // 原来那个 DEMAND_QUERY 意图已经去掉了——两个近义意图并存正是句子被判歪的原因。
+            new Sample("现在有哪些设备需求", Intent.QIUZU_QUERY),
+            new Sample("最近有哪些用机需求", Intent.QIUZU_QUERY),
+            // 新机询价不是同一回事（那是"有人想买"），归到设备买卖那边
+            new Sample("平台上有人要买新机吗", Intent.EQUIPMENT_QUERY),
 
             // ================= 平台知识（规则 + 维修保养）=================
             new Sample("在平台租设备的流程是什么", Intent.KNOWLEDGE_QUERY),
@@ -149,7 +152,7 @@ class IntentEvalTest {
             // ================= 口语化 / 隐含意图 =================
             new Sample("我这边有台小松200想放出去赚点租金", Intent.PUBLISH_CHUZU),
             new Sample("手头有台多余的设备，闲着也是闲着", Intent.PUBLISH_CHUZU),
-            new Sample("工地马上开工了还差两台挖机", Intent.DEMAND_QUERY),
+            new Sample("工地马上开工了还差两台挖机", Intent.QIUZU_QUERY),
             new Sample("你们这个钱怎么结", Intent.KNOWLEDGE_QUERY),
             new Sample("这台车还能值多少", Intent.EQUIPMENT_QUERY),
             new Sample("挖机空调不制冷了", Intent.KNOWLEDGE_QUERY),

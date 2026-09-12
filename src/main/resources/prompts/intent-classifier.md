@@ -11,8 +11,8 @@
 2. intent 必须是上面列表里的名字，不得自创，也不得输出 /reset 这类命令。
 3. 一句话里同时问了两个及以上**不同领域**的问题时选 CROSS_DOMAIN，
    并在 domains 里列出涉及的领域。domains 的取值只能是：
-   equipment(设备买卖) / chuzu(出租) / qiuzu(求租) / demand(用机需求询价) / news(资讯) / policy(平台规则/设备维修保养等知识)。
-   注意 chuzu、qiuzu、demand 都属于"租赁"这一块业务，
+   equipment(设备买卖/新机询价) / chuzu(出租) / qiuzu(求租) / news(资讯) / policy(平台规则/设备维修保养等知识)。
+   注意 chuzu、qiuzu 都属于"租赁"这一块业务，
    如果只问了其中一个，不算跨域。
 4. 判断不了就选 UNKNOWN，并把 confidence 打到 0.3 以下，不要瞎猜。
 5. confidence 是你对判断的把握，取值 0 到 1。

@@ -5,10 +5,14 @@ import com.jixiejia.agent.llm.PromptLibrary;
 import org.springframework.stereotype.Component;
 
 /**
- * 租赁 Agent。负责出租、求租、用机需求、新机询价四件事。
+ * 租赁 Agent。负责出租、求租两件事——方向正好相反，别搞混：
+ * "有机器的要往外租"（search_chuzu）vs "要用机器的人在找机器"（search_qiuzu）。
  *
- * <p>这四件事方向容易搞混（"有人要租机器"和"机主要找活"完全是反的），
- * 提示词里把每个工具的语义讲透了，见 {@code classpath:prompts/rental-agent.md}。
+ * <p>以前这里还有"用机需求"和"新机询价"两件事，后来拆了：
+ * 用机需求**就是求租**（同一个业务概念，平台上只是存了两张表），
+ * 合成一个工具一次查；新机询价是"有人想买"，归到设备买卖那边去了。
+ *
+ * <p>提示词里把每个工具的语义讲透了，见 {@code classpath:prompts/rental-agent.md}。
  */
 @Component
 public class RentalAgent extends AbstractReactAgent {

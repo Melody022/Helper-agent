@@ -41,7 +41,7 @@ class M3ToolLayerTest {
     private QiuzuQueryTool qiuzuQueryTool;
 
     @Autowired
-    private DemandQueryTool demandQueryTool;
+    private XunjiaQueryTool xunjiaQueryTool;
 
     @Autowired
     private NewsQueryTool newsQueryTool;
@@ -61,8 +61,7 @@ class M3ToolLayerTest {
     void autoRegistration() {
         assertThat(toolRegistry.allToolNames()).containsExactlyInAnyOrder(
                 "search_equipment", "get_equipment_detail",
-                "search_chuzu", "search_qiuzu",
-                "search_demand", "search_xunjia",
+                "search_chuzu", "search_qiuzu", "search_xunjia",
                 "search_news", "get_news_detail");
 
         // 同步到 ai_tool 后，每行都应带上能力标识与入参 schema
@@ -96,14 +95,13 @@ class M3ToolLayerTest {
     @Test
     @DisplayName("能力→工具：按 capability 能取到对应工具")
     void capabilityMapping() {
+        // 新机询价是"想买新机"的线索，归在设备买卖这一侧
         assertThat(toolRegistry.toolNamesForCapabilities(Set.of(ToolCapability.EQUIPMENT)))
-                .containsExactlyInAnyOrder("search_equipment", "get_equipment_detail");
+                .containsExactlyInAnyOrder("search_equipment", "get_equipment_detail", "search_xunjia");
 
         assertThat(toolRegistry.toolNamesForCapabilities(Set.of(ToolCapability.CHUZU)))
                 .containsExactly("search_chuzu");
 
-        assertThat(toolRegistry.toolNamesForCapabilities(Set.of(ToolCapability.DEMAND)))
-                .containsExactlyInAnyOrder("search_demand", "search_xunjia");
     }
 
     @Test
@@ -157,10 +155,19 @@ class M3ToolLayerTest {
     }
 
     @Test
-    @DisplayName("求租查询：设备类型字典 jxb_sblx")
+    @DisplayName("求租查询：一次查两张表（求租 + 用机需求，同一个业务概念）")
     void searchQiuzu() throws Exception {
+        // 求租表 3 条 + 用机需求表 6 条。它们是同一件事，只是当初建了两张表，
+        // 所以挂在同一个工具下、一次查完（详见 QiuzuQueryTool 的类注释）
         JsonNode all = parse(qiuzuQueryTool.searchQiuzu(null, null, null, null, null, 20));
-        assertThat(all.get("total").asInt()).isEqualTo(3);
+        assertThat(all.get("total").asInt()).isEqualTo(9);
+
+        // 返回里要标出来源，否则看不出这条来自哪张表
+        StringBuilder sources = new StringBuilder();
+        for (JsonNode item : all.get("items")) {
+            sources.append(item.get("source").asText()).append(',');
+        }
+        assertThat(sources.toString()).contains("求租").contains("用机需求");
 
         JsonNode xwz = parse(qiuzuQueryTool.searchQiuzu("旋挖钻", null, null, null, null, 20));
         assertThat(xwz.get("total").asInt()).isEqualTo(2);
@@ -174,26 +181,23 @@ class M3ToolLayerTest {
     }
 
     @Test
-    @DisplayName("需求查询：地址只有自由文本，按文本匹配并说明")
-    void searchDemand() throws Exception {
-        JsonNode all = parse(demandQueryTool.searchDemand(null, null, null, 20));
-        assertThat(all.get("total").asInt()).isEqualTo(6);
+    @DisplayName("求租合并用机需求：一边字典认不出的设备类型要**跳过**那一边，不是不过滤")
+    void mergedQiuzuSkipsSourceThatCannotFilter() throws Exception {
+        // "旋挖钻"只在求租表的字典（zl_sblx）里，需求表的字典（req_equipment_type）没有。
+        // 如果对需求表"不过滤"，用户问旋挖钻就会捞回一堆无关的需求——
+        // 那是比"少给几条"更糟的错，所以这里必须跳过并说明。
+        JsonNode xwz = parse(qiuzuQueryTool.searchQiuzu("旋挖钻", null, null, null, null, 20));
 
-        // 库里 6 条需求的 req_type 只有 小型挖掘机/起重机/平地机 三种
-        JsonNode typed = parse(demandQueryTool.searchDemand("起重机", null, null, 20));
-        assertThat(typed.get("total").asInt()).isEqualTo(2);
-        for (JsonNode item : typed.get("items")) {
-            assertThat(item.get("reqType").asText()).isEqualTo("起重机");
+        for (JsonNode item : xwz.get("items")) {
+            assertThat(item.get("source").asText()).isEqualTo("求租");
         }
+        assertThat(xwz.get("note").asText()).contains("未查该来源");
+    }
 
-        // 用机需求表没有区划列，工具必须说明是走的文本匹配
-        JsonNode byArea = parse(demandQueryTool.searchDemand(null, null, "洛阳", 20));
-        if (byArea.get("note") != null) {
-            assertThat(byArea.get("note").asText()).contains("地址文本");
-        }
-
-        // 询价表当前为空，应给出明确说明而不是空对象
-        JsonNode xunjia = parse(demandQueryTool.searchXunjia(null, null, 20));
+    @Test
+    @DisplayName("新机询价：归在设备买卖侧（那是有人想买新机），表为空时给明确说明")
+    void searchXunjia() throws Exception {
+        JsonNode xunjia = parse(xunjiaQueryTool.searchXunjia(null, null, 20));
         assertThat(xunjia.get("total").asInt()).isZero();
         assertThat(xunjia.get("note").asText()).contains("暂无");
     }

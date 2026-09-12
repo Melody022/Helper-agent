@@ -281,8 +281,8 @@ public class MsgRouter {
      * <ol>
      *   <li><b>只认高权重命中</b>。中权重词（"价格""设备"）跨域出现得太频繁，
      *       拿它触发会让这条昂贵路径天天误触发；</li>
-     *   <li><b>按解析后的 Agent 去重计数，而不是按意图计数</b>。chuzu / qiuzu / demand
-     *       三个意图都属于 RentalAgent，按意图数会把"有人要租吗、也有人要找活吗"
+     *   <li><b>按解析后的 Agent 去重计数，而不是按意图计数</b>。chuzu / qiuzu
+     *       两个意图都属于 RentalAgent，按意图数会把"有人要租吗、也有人要找活吗"
      *       判成跨域，然后把同一个 Agent 跑两遍；</li>
      *   <li><b>排除兜底 Agent</b>。兜底本就不代表任何领域，把它算进去会让任意
      *       "没匹配上"的组合都变成跨域。</li>
@@ -305,7 +305,7 @@ public class MsgRouter {
      *   <li>关键词高权重命中的意图（模型漏说时补上）。</li>
      * </ul>
      *
-     * <p>去重很关键：chuzu / qiuzu / demand 三个领域都由 RentalAgent 负责，
+     * <p>去重很关键：chuzu / qiuzu 两个领域都由 RentalAgent 负责，
      * 不去重会把同一个 Agent 排进去跑两遍。
      *
      * @return 去重后的 Agent 列表，可能为空或只有 1 个（调用方据此决定退化成单域）

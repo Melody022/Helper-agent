@@ -376,8 +376,6 @@ class M4RouterTest {
                 .isEqualTo("RentalAgent");
         assertThat(agentRegistry.match(Intent.QIUZU_QUERY, "USER").orElseThrow().agentKey())
                 .isEqualTo("RentalAgent");
-        assertThat(agentRegistry.match(Intent.DEMAND_QUERY, "USER").orElseThrow().agentKey())
-                .isEqualTo("RentalAgent");
         assertThat(agentRegistry.match(Intent.NEWS_QUERY, "USER").orElseThrow().agentKey())
                 .isEqualTo("KnowledgeAgent");
         assertThat(agentRegistry.match(Intent.PUBLISH_CHUZU, "USER").orElseThrow().agentKey())
@@ -393,11 +391,13 @@ class M4RouterTest {
     void agentToolsAreScopedByCapability() {
         AgentRegistry.AgentMatch equipment = agentRegistry.match(Intent.EQUIPMENT_QUERY, "USER").orElseThrow();
         assertThat(equipment.toolNames())
-                .containsExactlyInAnyOrder("search_equipment", "get_equipment_detail");
+                .containsExactlyInAnyOrder("search_equipment", "get_equipment_detail", "search_xunjia");
 
         AgentRegistry.AgentMatch rental = agentRegistry.match(Intent.CHUZU_QUERY, "USER").orElseThrow();
+        // "用机需求"已经并进求租（同一个业务概念），不再是独立工具；
+        // "新机询价"是"想买新机"，归到设备买卖那边了
         assertThat(rental.toolNames())
-                .containsExactlyInAnyOrder("search_chuzu", "search_qiuzu", "search_demand", "search_xunjia");
+                .containsExactlyInAnyOrder("search_chuzu", "search_qiuzu");
 
         assertThat(agentRegistry.fallback("USER").orElseThrow().toolNames()).isEmpty();
     }

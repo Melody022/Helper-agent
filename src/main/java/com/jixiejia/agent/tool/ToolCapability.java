@@ -12,11 +12,8 @@ public final class ToolCapability {
     /** 出租（设备招租） */
     public static final String CHUZU = "chuzu";
 
-    /** 求租（机主找活） */
+    /** 求租（有人要租设备：承租方发的需求，带工程/工期信息） */
     public static final String QIUZU = "qiuzu";
-
-    /** 用机需求 / 新机询价 */
-    public static final String DEMAND = "demand";
 
     /** 资讯 */
     public static final String NEWS = "news";
