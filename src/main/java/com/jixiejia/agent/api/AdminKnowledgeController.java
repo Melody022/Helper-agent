@@ -223,6 +223,10 @@ public class AdminKnowledgeController {
             row.put("sourceId", d.getSourceId());
             row.put("status", d.getStatus());
             row.put("chunkCount", d.getChunkCount());
+            // 只下发给前端"有没有原件、原件叫什么"：前端据此决定要不要显示"下载原件"。
+            // （不下发 preview_path —— 那是服务端内部路径，前端用不上）
+            row.put("fileName", d.getFileName());
+            row.put("filePath", d.getFilePath());
             row.put("createTime", d.getCreateTime());
             return row;
         }).toList();
