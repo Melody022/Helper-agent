@@ -29,12 +29,12 @@ import java.util.Set;
  * <ul>
  *   <li>关键词命中明确意图 X —— 和粘性里的意图比：一样就继续沿用，不一样立刻切换。
  *       这一步完全不调模型。</li>
- *   <li>关键词没命中（"那这个呢""多少钱"这种半截话）—— 只要粘性还在，
- *       就直接沿用上一轮的 Agent，<b>同样不调模型</b>。追问本来就不该重新分类。</li>
- *   <li>只有"关键词没命中 且 没有粘性"才升级到第 ④⑤ 步叫模型。</li>
+ *   <li>关键词没命中，<b>且这句话看起来是追问</b>（含指代词，或很短）—— 只要粘性还在，
+ *       就直接沿用上一轮的 Agent，不调模型。追问本来就不该重新分类。</li>
+ *   <li>其余情况（关键词没命中、又不像追问）—— 走第 ④⑤ 步叫模型。
+ *       <b>这一条是补上的</b>：原来"关键词没命中"就直接用粘性，
+ *       结果"只是不含关键词的新问题"会被一直粘在上一轮的 Agent 上。</li>
  * </ul>
- * 换句话说：粘性不是"信任上一轮"，而是"用免费的关键词扫描先确认没换话题，
- * 确认不了再交给粘性兜底"。
  */
 @Slf4j
 @Component
@@ -70,6 +70,16 @@ public class MsgRouter {
     /** 单轮跨域最多并行跑几个域，与 CompositeGraph 读同一个配置项 */
     @Value("${routing.cross-domain.max-agents:3}")
     private int crossDomainMaxAgents;
+
+    /**
+     * 超过这个字数、又不含指代词的话，就不再当作"追问"，要老老实实重新分类。
+     *
+     * <p>半截追问都很短（"多少钱""那这个呢""有推荐吗"），而"只是不含关键词的新问题"
+     * 通常是一句完整的话。12 个字是这两者的分界——调大能让更多话走粘性快路径（省一次分类），
+     * 但调太大就会重演"新问题被粘性吃掉"。
+     */
+    @Value("${routing.sticky.follow-up-max-chars:12}")
+    private int followUpMaxChars;
 
     /**
      * 执行一次路由。本方法只做判定，不执行 Agent、不落消息——
@@ -129,8 +139,23 @@ public class MsgRouter {
             return routeByKnownIntent(request, byKeyword.get(), sticky, roleKey, start);
         }
 
-        // 关键词没命中：模糊追问优先用粘性兜住，避免白跑一次模型
-        if (sticky.isPresent()) {
+        // 关键词没命中：**只有看起来是追问时**才用粘性兜住，避免白跑一次模型。
+        //
+        // ⚠️ 这里原来写的是"关键词没命中就用粘性"，但这两件事并不等价：
+        // "关键词没命中"既可能是"那这个呢"这类半截追问，也可能是
+        // "挖掘机操纵杆和其他零件的距离应该控制在多少"这类**只是不含关键词的新问题**
+        // （领域名词"挖掘机"刻意没放进高权重词表，所以这类问题必然落空）。
+        // 后者被粘性吃掉，就会一直挂在上一轮的 Agent 上——
+        // 实测用户先问了设备、接着连问两个安全规范问题，全被 EquipmentAgent 接走，
+        // 两轮都答"我帮不上忙"，而知识库里其实有那份国标、答得上来。
+        //
+        // 判据用两条：含指代词（那是真回指），或者足够短（半截追问的形态）。
+        // 都不满足就不是追问，老老实实往下走第 ④⑤ 步叫模型——
+        // 反正第 ⑤ 步第一层是小模型，本地免费，真有成本的是第 ③ 层大模型。
+        boolean looksLikeFollowUp = referenceResolver.needsResolution(message)
+                || message.length() <= followUpMaxChars;
+
+        if (looksLikeFollowUp && sticky.isPresent()) {
             Optional<AgentRegistry.AgentMatch> reuse =
                     agentRegistry.byKey(sticky.get().agentKey(), roleKey);
             if (reuse.isPresent()) {
@@ -138,12 +163,15 @@ public class MsgRouter {
                 RoutingDecision decision = new RoutingDecision(
                         RouteStage.STICKY, stickyIntent, 1.0, null,
                         reuse.get().agentKey(), Set.of(), reuse.get().toolNames(), message,
-                        null, "关键词未命中，沿用会话粘性 Agent=" + reuse.get().agentKey());
+                        null, "关键词未命中且判定为追问，沿用会话粘性 Agent=" + reuse.get().agentKey());
                 log.debug("粘性兜底：{} -> {}", message, reuse.get().agentKey());
                 return auditAndReturn(request, decision, start);
             }
             // 粘性里的 Agent 已被停用或删除，只能重新分类
             log.debug("粘性 Agent {} 已不可用，重新分类", sticky.get().agentKey());
+        } else if (sticky.isPresent()) {
+            log.debug("关键词未命中但不像追问（{} 字），重新分类而不是沿用粘性：{}",
+                    message.length(), message);
         }
 
         // ---------- ④ 指代消解（只有真要叫模型时才做）----------

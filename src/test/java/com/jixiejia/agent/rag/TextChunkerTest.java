@@ -81,7 +81,9 @@ class TextChunkerTest {
     @Test
     @DisplayName("空文本不产生块")
     void blankTextProducesNothing() {
-        assertThat(chunker.chunk(null)).isEmpty();
+        // 显式转成 String：chunk 现在有 String / List<DocBlock> 两个重载，
+        // 传裸 null 编译器判不出该调哪个
+        assertThat(chunker.chunk((String) null)).isEmpty();
         assertThat(chunker.chunk("")).isEmpty();
         assertThat(chunker.chunk("   \n  ")).isEmpty();
     }

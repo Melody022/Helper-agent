@@ -251,6 +251,45 @@ class M4RouterTest {
     }
 
     @Test
+    @DisplayName("粘性：不含关键词的**完整新问题**不该被粘性吃掉")
+    void longNewQuestionIsNotSwallowedBySticky() {
+        String conversationId = newConversationId();
+
+        RoutingDecision first = msgRouter.route(request(conversationId, "有没有二手的挖掘机"));
+        assertThat(first.agentKey()).isEqualTo("EquipmentAgent");
+
+        // 实测踩过的场景：用户问完设备，接着问了一句安全规范。
+        // 这句话**不含任何高权重关键词**（领域名词"挖掘机"刻意没进词表，
+        // 因为它同时出现在出租/求租/需求里），但它是一句完整的新问题，不是追问。
+        //
+        // 原来的判据是"关键词没命中就用粘性兜住"，于是它被一直粘在 EquipmentAgent 上，
+        // 连问两轮都答"我帮不上忙"——而知识库里其实有那份国标、答得上来。
+        RoutingDecision second = msgRouter.route(request(conversationId,
+                "挖掘机操纵杆和其他零件的距离应该控制在多少"));
+
+        assertThat(second.stage())
+                .as("完整的新问题必须重新分类，不能走粘性")
+                .isNotEqualTo(RouteStage.STICKY);
+        assertThat(second.agentKey())
+                .as("不该再挂在上一轮的设备 Agent 上")
+                .isNotEqualTo("EquipmentAgent");
+    }
+
+    @Test
+    @DisplayName("粘性：短的半截追问仍然走粘性（修完上面的洞不能把这条路也堵了）")
+    void shortFollowUpStillUsesSticky() {
+        String conversationId = newConversationId();
+
+        msgRouter.route(request(conversationId, "有没有二手的挖掘机"));
+
+        // "多少钱" 三个字、不含指代词，但足够短——半截追问的典型形态
+        RoutingDecision followUp = msgRouter.route(request(conversationId, "多少钱"));
+
+        assertThat(followUp.stage()).isEqualTo(RouteStage.STICKY);
+        assertThat(followUp.agentKey()).isEqualTo("EquipmentAgent");
+    }
+
+    @Test
     @DisplayName("粘性：关键词命中同一话题时继续沿用，也不叫模型")
     void sameTopicKeywordKeepsSticky() {
         String conversationId = newConversationId();
