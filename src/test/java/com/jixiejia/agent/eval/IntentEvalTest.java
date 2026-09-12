@@ -47,56 +47,113 @@ class IntentEvalTest {
      * 人工标注的评估集。
      *
      * <p>构成：标准说法、口语说法、隐含意图、跨域各占一部分。
-     * 期望值按"用户真正想要什么"标注，不按字面关键词。
+     * 期望值按"**用户真正想要什么**"标注，不按字面关键词。
+     *
+     * <p><b>为什么按"对照组"组织而不是按意图堆数量。</b>
+     * 只有"每个意图各来几条"的话，改完看不出是真好了还是换了个错法。
+     * 真正会暴露问题的是**长得像但期望不同**的句子——
+     * 所以下面专门有几组对照：发布 vs 查询、跨域 vs 不该跨域。
+     * 词表/判据一动，先看这几组掉没掉。
      */
     private static final List<Sample> SAMPLES = List.of(
-            // ---- 设备买卖 ----
+            // ================= 设备买卖 =================
             new Sample("有没有二手的挖掘机", Intent.EQUIPMENT_QUERY),
             new Sample("小松200卖多少钱", Intent.EQUIPMENT_QUERY),
             new Sample("想买台装载机，有什么车源", Intent.EQUIPMENT_QUERY),
             new Sample("这台挖掘机表显多少小时", Intent.EQUIPMENT_QUERY),
+            new Sample("有卡特320吗", Intent.EQUIPMENT_QUERY),
+            new Sample("20吨级挖机什么价", Intent.EQUIPMENT_QUERY),
+            new Sample("有没有三一的车源", Intent.EQUIPMENT_QUERY),
 
-            // ---- 出租 ----
+            // ================= 出租查询（我是承租方）=================
             new Sample("附近有挖掘机出租吗", Intent.CHUZU_QUERY),
             new Sample("我想租台挖机干活", Intent.CHUZU_QUERY),
             new Sample("你们这儿有对外租的设备吗", Intent.CHUZU_QUERY),
+            new Sample("有没有洋马60出租", Intent.CHUZU_QUERY),
+            new Sample("挖掘机出租一天多少钱", Intent.CHUZU_QUERY),
+            new Sample("6吨以下的小挖好租吗", Intent.CHUZU_QUERY),
 
-            // ---- 求租（机主找活）----
+            // ================= 求租（我是机主，找活干）=================
             new Sample("哪里有求租的", Intent.QIUZU_QUERY),
             new Sample("我有台挖机想找活干", Intent.QIUZU_QUERY),
+            new Sample("工地上有没有活干", Intent.QIUZU_QUERY),
+            new Sample("想给机器找个长期活", Intent.QIUZU_QUERY),
 
-            // ---- 用机需求 / 询价 ----
+            // ================= 用机需求 / 询价 =================
             new Sample("现在有哪些设备需求", Intent.DEMAND_QUERY),
             new Sample("平台上有人要买新机吗", Intent.DEMAND_QUERY),
+            new Sample("最近有哪些用机需求", Intent.DEMAND_QUERY),
 
-            // ---- 平台知识（规则 + 维修保养）----
+            // ================= 平台知识（规则 + 维修保养）=================
             new Sample("在平台租设备的流程是什么", Intent.KNOWLEDGE_QUERY),
             new Sample("押金怎么退", Intent.KNOWLEDGE_QUERY),
             new Sample("小松200-8空调故障怎么解决", Intent.KNOWLEDGE_QUERY),
             new Sample("挖掘机多久保养一次", Intent.KNOWLEDGE_QUERY),
+            new Sample("平台收多少服务费", Intent.KNOWLEDGE_QUERY),
+            new Sample("发布设备要审核多久", Intent.KNOWLEDGE_QUERY),
+            new Sample("设备过户需要什么材料", Intent.KNOWLEDGE_QUERY),
+            new Sample("挖掘机液压油多久换一次", Intent.KNOWLEDGE_QUERY),
+            new Sample("装载机冒黑烟是什么原因", Intent.KNOWLEDGE_QUERY),
+            new Sample("押金多久能退回来", Intent.KNOWLEDGE_QUERY),
 
-            // ---- 资讯列表 ----
+            // ================= 资讯列表 =================
             new Sample("有什么挖掘机相关的资讯", Intent.NEWS_QUERY),
             new Sample("最近有什么文章", Intent.NEWS_QUERY),
+            new Sample("最近有什么行业动态", Intent.NEWS_QUERY),
+            new Sample("有没有挖掘机的评测文章", Intent.NEWS_QUERY),
 
-            // ---- 发布 ----
+            // ================= 发布（我是机主，要挂出去）=================
             new Sample("帮我发布一台出租", Intent.PUBLISH_CHUZU),
+            new Sample("我要出租一台装载机", Intent.PUBLISH_CHUZU),
+            new Sample("我想出租一台洋马60", Intent.PUBLISH_CHUZU),
+            new Sample("我打算把设备放平台出租", Intent.PUBLISH_CHUZU),
+            new Sample("我有台挖机想挂出去", Intent.PUBLISH_CHUZU),
             new Sample("我要发布求租信息", Intent.PUBLISH_QIUZU),
+            new Sample("帮我发个求租，找一台20吨挖机", Intent.PUBLISH_QIUZU),
 
-            // ---- 短路 ----
+            // ================= 短路：转人工 / 投诉 / 闲聊 =================
             new Sample("转人工", Intent.HANDOFF),
+            new Sample("我要找客服", Intent.HANDOFF),
             new Sample("我要投诉", Intent.COMPLAINT),
-
-            // ---- 闲聊 / 兜底 ----
+            new Sample("你们这是骗人的吧", Intent.COMPLAINT),
+            new Sample("我要举报一个卖家", Intent.COMPLAINT),
             new Sample("你好", Intent.CHITCHAT),
+            new Sample("谢谢", Intent.CHITCHAT),
 
-            // ---- 跨域 ----
+            // ================= 跨域：确实问了两个及以上领域 =================
+            new Sample("有没有20吨挖机、附近能租吗、流程是啥", Intent.CROSS_DOMAIN),
             new Sample("有二手的挖掘机吗，另外有没有挖掘机出租", Intent.CROSS_DOMAIN),
+            new Sample("想买台挖机，也想知道有没有出租的", Intent.CROSS_DOMAIN),
+            new Sample("有没有车源，另外有没有活干", Intent.CROSS_DOMAIN),
 
-            // ---- 容易错的：口语化、隐含意图 ----
-            new Sample("我这边有台小松200想放出去赚点租金", Intent.CHUZU_QUERY),
+            // ============ 对照组一：发布 vs 查询 ============
+            // 这几对的**字面高度重合**（都含"出租"），但**主体不同**——
+            // "我出租我的设备"是发布，"我找别人出租的设备"是查询。
+            // 词表一放宽或一收紧，先看这一组：
+            //
+            //   发布侧："我想出租一台洋马60" / "我有台挖机想挂出去"
+            //   查询侧："有没有洋马60出租" / "挖掘机出租一天多少钱"
+            //
+            // 用户实测报过的就是发布侧第一句——当时被判成了查询。
+            // （上面已按意图分组收录，这里不再重复，避免同一句被测两次拉高权重。）
+
+            // ============ 对照组二：字面命中多个域，但**不该**判跨域 ============
+            // 这几句里都出现了两个领域的词，但用户其实只问了一件事。
+            // "数关键词命中几个域"这个判据最容易在这里翻车。
+            // （已在上面出现过的样本不在这里重复，避免同一句被测两次拉高权重。）
+            new Sample("二手设备出租信息多吗", Intent.CHUZU_QUERY),
+            new Sample("有没有带属具的挖机出租", Intent.CHUZU_QUERY),
+            new Sample("装载机出租的行情怎么样", Intent.CHUZU_QUERY),
+            new Sample("二手挖机好出手吗", Intent.EQUIPMENT_QUERY),
+
+            // ================= 口语化 / 隐含意图 =================
+            new Sample("我这边有台小松200想放出去赚点租金", Intent.PUBLISH_CHUZU),
+            new Sample("手头有台多余的设备，闲着也是闲着", Intent.PUBLISH_CHUZU),
             new Sample("工地马上开工了还差两台挖机", Intent.DEMAND_QUERY),
-            new Sample("你们这个钱怎么结", Intent.KNOWLEDGE_QUERY)
+            new Sample("你们这个钱怎么结", Intent.KNOWLEDGE_QUERY),
+            new Sample("这台车还能值多少", Intent.EQUIPMENT_QUERY),
+            new Sample("挖机空调不制冷了", Intent.KNOWLEDGE_QUERY),
+            new Sample("想弄台小挖，预算不多", Intent.EQUIPMENT_QUERY)
     );
 
     @Autowired
