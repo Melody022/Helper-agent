@@ -221,6 +221,59 @@ class DocumentUploadTest {
         assertThat(tables).as("上一页表格后面还有正文，说明表已结束，不该合并").hasSize(2);
     }
 
+    // ---------------- 文档标题提取 ----------------
+
+    @Test
+    @DisplayName("标题提取：markdown 的一级标题优先")
+    void extractTitleFromHeading() {
+        String md = "# 机械家设备年检规定\n\n## 年检周期\n内容";
+
+        assertThat(DocumentParser.extractTitle(md, "文件名")).isEqualTo("机械家设备年检规定");
+    }
+
+    @Test
+    @DisplayName("标题提取：扫描件 OCR 文本没有 # 标记，也要能猜出真标题")
+    void extractTitleFromOcrText() {
+        // 这段是真实国标 PDF 经多模态 OCR 后的开头（原本没有 markdown 标记）。
+        // 真标题在最后一行；前面全是标准号、页眉、说明性套话。
+        String ocr = """
+                ICS 73.100.30
+                CCS D 92
+
+                中华人民共和国国家标准
+
+                GB/T 25523—2022
+                部分代替 GB 25523—2010
+
+                ---
+
+                矿用机械正铲式挖掘机 安全要求
+
+                Electric mining rope shovel—Safety requirements
+                """;
+
+        // 拿不到真标题的代价很大：文件名 GBT+25523-2022 和"挖掘机"没有词面交集，
+        // 表格摘要带上它之后照样召回不到"挖掘机…危险因素"这个问题。
+        assertThat(DocumentParser.extractTitle(ocr, "GBT+25523-2022"))
+                .as("应当认出「矿用机械正铲式挖掘机 安全要求」，而不是退回文件名")
+                .isEqualTo("矿用机械正铲式挖掘机 安全要求");
+    }
+
+    @Test
+    @DisplayName("标题提取：实在认不出来时退回文件名，不能乱猜")
+    void extractTitleFallsBack() {
+        String noise = """
+                ICS 73.100.30
+                CCS D 92
+                GB/T 12345—2020
+                部分代替 GB 12345—2010
+                """;
+
+        assertThat(DocumentParser.extractTitle(noise, "fallback.pdf")).isEqualTo("fallback.pdf");
+        assertThat(DocumentParser.extractTitle("", "empty.pdf")).isEqualTo("empty.pdf");
+        assertThat(DocumentParser.extractTitle(null, "null.pdf")).isEqualTo("null.pdf");
+    }
+
     // ---------------- 输入校验 ----------------
 
     @Test

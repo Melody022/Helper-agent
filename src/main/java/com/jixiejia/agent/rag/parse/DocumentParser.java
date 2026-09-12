@@ -129,11 +129,103 @@ public class DocumentParser {
         }
 
         String title = stripExtension(filename);
-        return switch (kind) {
+        ParsedDocument parsed = switch (kind) {
             case PLAIN_TEXT -> parsePlainText(title, bytes);
             case IMAGE -> parseImage(title, bytes);
             case LITEPARSE -> parseWithLiteParse(title, ext, bytes);
         };
+
+        // 标题优先取正文里的一级标题，取不到才退回文件名。
+        //
+        // 为什么重要：上传的国标文件名是 "GBT+25523-2022.pdf"，光看这个标题，
+        // 向量库里那条记录和"挖掘机"没有任何词面交集；而正文 H1 是
+        // "矿用机械正铲式挖掘机 安全要求"——**含"挖掘机"，是能被召回的关键**。
+        // 实测用户问"挖掘机生命周期可能出现什么危险因素"，表格摘要因为标题里
+        // 没有"挖掘机"而落选，明明表里就是答案。
+        String better = extractTitle(parsed.text(), title);
+        return better.equals(parsed.title()) ? parsed
+                : new ParsedDocument(parsed.text(), better, parsed.pageCount(),
+                        parsed.ocrPages(), parsed.tables(), parsed.warnings());
+    }
+
+    /**
+     * 取文档标题：优先正文里的一级标题，取不到就从 OCR 文本里猜一个像标题的行。
+     *
+     * <p><b>为什么非要拿到真标题。</b>上传的国标文件名是 {@code GBT+25523-2022.pdf}，
+     * 拿它当标题的话，这份文档在向量库里和"挖掘机"**没有任何词面交集**——
+     * 而它的正文标题是《矿用机械正铲式挖掘机 安全要求》。
+     * 实测用户问"挖掘机生命周期可能出现什么危险因素"，答案就是本文档的
+     * "表 1 危险一览表"，但表格摘要前缀是文件名，向量召回和 BM25 双双输给了
+     * 满篇"挖掘机"的其它段落，模型拿到资料后只能说"表1的内容没有提供"。
+     *
+     * <p>OCR 出来的文本没有 markdown 的 {@code #} 标记（扫描件里的标题就是一行普通文字），
+     * 所以还得有个启发式兜底：**在开头若干行里找一行"像标题的中文短行"**，
+     * 排除标准号、页眉、说明性套话这些噪声。
+     */
+    public static String extractTitle(String markdown, String fallback) {
+        if (markdown == null || markdown.isBlank()) {
+            return fallback;
+        }
+        String[] lines = markdown.split("\n", 60);
+
+        // ① markdown 一级标题最可靠
+        for (String line : lines) {
+            String t = line.trim();
+            if (t.startsWith("# ")) {
+                String heading = t.substring(2).trim();
+                if (!heading.isBlank()) {
+                    return clamp(heading);
+                }
+            }
+        }
+
+        // ② OCR 文本：找一行像标题的中文短行
+        for (String line : lines) {
+            String t = line.trim();
+            if (isLikelyTitle(t)) {
+                return clamp(t);
+            }
+        }
+        return fallback;
+    }
+
+    /** 标题的长度上限，超了说明不是标题（数据库列是 varchar(500)，这里留足余量）。 */
+    private static String clamp(String s) {
+        return s.length() > 200 ? s.substring(0, 200) : s;
+    }
+
+    /**
+     * 这一行像不像"文档标题"。
+     *
+     * <p>判据是照着真实国标 PDF 的开头调的——那里依次出现
+     * {@code ICS 73.100.30}、{@code 中华人民共和国国家标准}、{@code GB/T 25523—2022}、
+     * {@code 部分代替 GB 25523—2010}，最后才是真正的标题
+     * {@code 矿用机械正铲式挖掘机 安全要求}。前几行都是噪声，必须排除掉。
+     */
+    private static boolean isLikelyTitle(String line) {
+        if (line.isBlank() || line.length() < 4 || line.length() > 60) {
+            return false;
+        }
+        // 必须含中文：纯英文/纯数字/标准号行不是我们要的标题
+        long cjk = line.chars().filter(c -> c >= 0x4E00 && c <= 0x9FFF).count();
+        if (cjk < 4) {
+            return false;
+        }
+        // 中文占比要够高，排除"部分代替 GB 25523—2010"这类中英混排的说明行
+        if ((double) cjk / line.length() < 0.6) {
+            return false;
+        }
+        // 排掉常见套话与页眉页脚
+        String[] noise = {"国家标准", "部分代替", "代替", "发布", "实施", "前言", "目次",
+                "范围", "规范性引用", "术语和定义", "版权", "ICS", "CCS"};
+        for (String n : noise) {
+            if (line.contains(n)) {
+                return false;
+            }
+        }
+        // 以标点结尾的多半是正文句子，不是标题
+        char last = line.charAt(line.length() - 1);
+        return "。；，、！？.,;".indexOf(last) < 0;
     }
 
     // ---------------- 纯文本 / 图片 ----------------

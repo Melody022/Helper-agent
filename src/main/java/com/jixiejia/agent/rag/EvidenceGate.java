@@ -81,9 +81,10 @@ public class EvidenceGate {
      * @param rerankScore   精排最高分；精排不可用或未启用时为 -1
      * @param evidenceCount 达到相关性门槛的条数
      * @param reason        判定说明，落审计与飞轮
+     * @param evidence      按精排分排序后的资料，<b>生成阶段要用这一份</b>
      */
     public record Verdict(boolean passed, double topScore, double rerankScore,
-                          int evidenceCount, String reason) {
+                          int evidenceCount, String reason, List<KnowledgeRetriever.Hit> evidence) {
     }
 
     /**
@@ -95,44 +96,73 @@ public class EvidenceGate {
      */
     public Verdict evaluate(String query, List<KnowledgeRetriever.Hit> hits, boolean enabled) {
         if (!enabled) {
-            return new Verdict(true, topVectorScore(hits), -1, hits == null ? 0 : hits.size(),
-                    "证据闸已关闭");
+            return new Verdict(true, topVectorScore(hits), -1,
+                    hits == null ? 0 : hits.size(), "证据闸已关闭", safe(hits));
         }
         if (hits == null || hits.isEmpty()) {
-            return new Verdict(false, 0.0, -1, 0, "没有检索到任何资料");
+            return new Verdict(false, 0.0, -1, 0, "没有检索到任何资料", List.of());
         }
 
         double topVector = topVectorScore(hits);
 
         // ① 精排（主判据）。拿不到分就往下走兜底判据，不让整条链路不可用。
-        Double topRerank = null;
+        //
+        // 注意这里会对**全部候选**逐条打分，而不只是最高分——因为下游生成要用
+        // "按精排分排序后的前几条"，精排的排序结果本身就是不可丢的信息。
+        List<Double> scores = null;
         if (rerankEnabled && rerankScorer != null && rerankScorer.configured()) {
-            List<Double> scores = rerankScorer.scoreAll(query,
+            scores = rerankScorer.scoreAll(query,
                     hits.stream().map(EvidenceGate::rerankText).toList());
-            if (scores != null) {
-                topRerank = scores.stream().mapToDouble(Double::doubleValue).max().orElse(0.0);
-            }
         }
 
-        if (topRerank != null) {
+        if (scores != null) {
+            List<KnowledgeRetriever.Hit> ranked = rerankOrder(hits, scores);
+            double topRerank = ranked.isEmpty() ? 0.0 : scores.stream()
+                    .mapToDouble(Double::doubleValue).max().orElse(0.0);
+
             if (topRerank < minRerankScore) {
                 return new Verdict(false, topVector, topRerank, countAbove(hits, minRetrievalScore),
                         String.format("精排判定没有可用资料：最高 %.3f 低于门槛 %.3f",
-                                topRerank, minRerankScore));
+                                topRerank, minRerankScore), ranked);
             }
             return new Verdict(true, topVector, topRerank, countAbove(hits, minRetrievalScore),
-                    String.format("资料充足：精排最高 %.3f（向量最高 %.3f）", topRerank, topVector));
+                    String.format("资料充足：精排最高 %.3f（向量最高 %.3f）", topRerank, topVector),
+                    ranked);
         }
 
         // ② 兜底：精排不可用，退回向量相似度。它分不开正负样本，只能滤掉明显没资料的。
         if (topVector < minRetrievalScore) {
             return new Verdict(false, topVector, -1, countAbove(hits, minRetrievalScore),
                     String.format("精排不可用，退回向量判据：最高 %.3f 低于门槛 %.2f",
-                            topVector, minRetrievalScore));
+                            topVector, minRetrievalScore), hits);
         }
         int effective = countAbove(hits, minRetrievalScore);
         return new Verdict(true, topVector, -1, effective,
-                String.format("精排不可用，按向量判据放行：最高 %.3f，达标条数 %d", topVector, effective));
+                String.format("精排不可用，按向量判据放行：最高 %.3f，达标条数 %d", topVector, effective),
+                hits);
+    }
+
+    /** 按精排分从高到低重排候选。分数数组与 hits 一一对应。 */
+    private static List<KnowledgeRetriever.Hit> rerankOrder(List<KnowledgeRetriever.Hit> hits,
+                                                            List<Double> scores) {
+        List<KnowledgeRetriever.Hit> copy = new java.util.ArrayList<>(hits);
+        // 用下标配对，避免分数相同导致顺序不稳定
+        List<Integer> order = new java.util.ArrayList<>();
+        for (int i = 0; i < copy.size(); i++) {
+            order.add(i);
+        }
+        order.sort((a, b) -> Double.compare(
+                b < scores.size() ? scores.get(b) : 0.0,
+                a < scores.size() ? scores.get(a) : 0.0));
+        List<KnowledgeRetriever.Hit> ranked = new java.util.ArrayList<>(copy.size());
+        for (int idx : order) {
+            ranked.add(copy.get(idx));
+        }
+        return ranked;
+    }
+
+    private static List<KnowledgeRetriever.Hit> safe(List<KnowledgeRetriever.Hit> hits) {
+        return hits == null ? List.of() : hits;
     }
 
     /**

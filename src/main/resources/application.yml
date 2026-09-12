@@ -188,6 +188,10 @@ rag:
   retrieval:
     # 最终喂给模型的证据条数
     top-k: ${RAG_TOP_K:5}
+    # 送进精排的候选条数。要明显大于 top-k：检索的排序和精排的排序不是一回事，
+    # 真正的答案未必在检索的前 5 里（实测一张 32 行的危险表在向量那路排第 2，
+    # 却因只走单路被 RRF 挤出前 5，精排根本没见到它）。召回放宽、精排收紧。
+    rerank-candidates: ${RAG_RERANK_CANDIDATES:20}
     # 每路各召回多少条候选，融合后再截断
     candidates: ${RAG_CANDIDATES:20}
     # KNN 考察的候选向量数，必须 >= candidates

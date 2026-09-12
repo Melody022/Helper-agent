@@ -65,6 +65,16 @@ public class KnowledgeAnswerService {
     @Value("${rag.retrieval.top-k:5}")
     private int topK;
 
+    /**
+     * 送进精排的候选条数。
+     *
+     * <p>要明显大于 {@code top-k}：检索的排序（RRF 融合）和精排的排序不是一回事，
+     * 真正该用的资料未必在检索的前 5 里。放宽到 20 让精排有机会看到它，
+     * 再由精排决定最终喂哪几条——"召回放宽、精排收紧"。
+     */
+    @Value("${rag.retrieval.rerank-candidates:20}")
+    private int rerankCandidates;
+
     @Value("${rag.evidence-gate.enabled:true}")
     private boolean gateEnabled;
 
@@ -90,11 +100,15 @@ public class KnowledgeAnswerService {
      * @param conversationId 用于飞轮溯源，可为 null
      */
     public Answer answer(String question, String conversationId) {
-        // ① 检索
-        List<KnowledgeRetriever.Hit> hits = retriever.retrieve(question, topK);
+        // ① 检索。**取一批候选（20 条），不是直接取要喂给模型的 5 条**——
+        // 检索（RRF 融合）和精排是两种排序，谁也没有义务替对方把对的资料排进前 5。
+        // 实测踩过：一张表格摘要在向量那路排第 2、却因为只走单路在 RRF 里被挤出前 5，
+        // 精排根本没见过它，模型只能答"表1的内容没有提供"。
+        // 正确姿势是"召回放宽、精排收紧"：宽召回把资料捞进来，精排负责挑出真正相关的。
+        List<KnowledgeRetriever.Hit> candidates = retriever.retrieve(question, rerankCandidates);
 
-        // ② 证据闸：资料不够就不生成
-        EvidenceGate.Verdict gate = evidenceGate.evaluate(question, hits, gateEnabled);
+        // ② 证据闸：资料不够就不生成。它同时把候选按精排分排好序返回。
+        EvidenceGate.Verdict gate = evidenceGate.evaluate(question, candidates, gateEnabled);
         if (!gate.passed()) {
             log.info("证据闸拦下：{}（{}）", question, gate.reason());
             flywheelService.record(FlywheelService.SOURCE_WEAK_EVIDENCE,
@@ -103,9 +117,13 @@ public class KnowledgeAnswerService {
                     gate.evidenceCount(), gate.reason());
         }
 
-        // ③ 生成。喂给模型之前先把命中的表格摘要换成完整表格——
+        // ③ 只把精排选出来的前几条喂给模型，避免无关资料干扰
+        List<KnowledgeRetriever.Hit> evidence = gate.evidence().stream().limit(topK).toList();
+
+        // ④ 生成。喂给模型之前先把命中的表格摘要换成完整表格——
         // 摘要只够"让检索命中"，拿它回答等于只给模型看表头和前几行，数据一定是错的。
-        String answer = generate(question, expandTables(hits));
+        List<KnowledgeRetriever.Hit> expanded = expandTables(evidence);
+        String answer = generate(question, expanded);
         if (answer == null || answer.isBlank()) {
             flywheelService.record(FlywheelService.SOURCE_WEAK_EVIDENCE,
                     conversationId, question, null, gate.topScore());
@@ -113,9 +131,10 @@ public class KnowledgeAnswerService {
                     gate.evidenceCount(), "生成回答失败");
         }
 
-        // ④ 自评：答案有没有超出资料
+        // ⑤ 自评：答案有没有超出资料。要拿**同一份**（已回填完整表格的）资料去核对，
+        // 否则表格题会变成"答案里有表里的数字、但自评看到的资料里没有"，稳定误杀。
         if (selfEvalEnabled) {
-            String selfVerdict = selfEvaluate(question, hits, answer);
+            String selfVerdict = selfEvaluate(question, expanded, answer);
             if (!"是".equals(selfVerdict)) {
                 // 把模型的原始判定打出来。自评误杀是最难发现的一类问题——
                 // 明明能答的问题被拒答，从用户侧看就是"这个机器人什么都不会"，

@@ -296,6 +296,19 @@ public class KnowledgeIngestionService {
         doc.setStatus("INDEXED");
         doc.setErrorMsg(null);
         docMapper.updateById(doc);
+
+        // 显式刷新索引。
+        //
+        // ES 是近实时的：写完默认要等 1 秒左右才可搜。不刷的话，"上传完立刻提问"
+        // 会检索到旧视图——实测就踩到了：传完 15 页国标后马上问，切片明明在库里、
+        // 却一条都搜不到，查了半天以为表格没入库（其实是索引还没刷新，
+        // 手工执行一次 _refresh 就全出来了）。
+        // 入库是低频操作，这里多花几十毫秒换"传完即可搜"是值得的。
+        try {
+            es.indices().refresh(r -> r.index(KnowledgeIndex.NAME));
+        } catch (Exception e) {
+            log.warn("刷新索引失败（不影响入库，检索可能延迟 1 秒生效）：{}", e.toString());
+        }
         return index;
     }
 
@@ -317,6 +330,18 @@ public class KnowledgeIngestionService {
             if (summary.isBlank()) {
                 continue;
             }
+
+            // 摘要前面拼上文档标题。
+            //
+            // 为什么必须拼：表格摘要本身只有"表 X」「列名」和几行数据，
+            // 往往**不含文档主题词**。实测"挖掘机生命周期可能出现什么危险因素"
+            // 这个问题，答案就是《矿用机械正铲式挖掘机 安全要求》里的"表 1 危险一览表"，
+            // 但摘要里没有"挖掘机"三个字，向量召回和 BM25 都输给了满篇"挖掘机"的正文段落，
+            // 结果模型拿到资料后只能说"表1的内容没有提供"。
+            // 拼上标题（"矿用机械正铲式挖掘机 安全要求 表 1 危险一览表"）就带上了主题词。
+            String withContext = (doc.getTitle() == null || doc.getTitle().isBlank())
+                    ? summary : doc.getTitle() + "\n" + summary;
+
             String hash = TextChunker.sha256(table.markdown());
 
             AiKnowledgeTable row = new AiKnowledgeTable();
@@ -332,7 +357,8 @@ public class KnowledgeIngestionService {
             row.setContentHash(hash);
             tableMapper.insert(row);
 
-            summaries.add(new TextChunker.Chunk(seq, summary, TextChunker.sha256(summary), row.getId()));
+            summaries.add(new TextChunker.Chunk(seq, withContext,
+                    TextChunker.sha256(withContext), row.getId()));
             seq++;
         }
         return summaries;
