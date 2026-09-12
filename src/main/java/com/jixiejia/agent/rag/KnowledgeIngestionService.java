@@ -4,11 +4,15 @@ import co.elastic.clients.elasticsearch.ElasticsearchClient;
 import com.baomidou.mybatisplus.core.toolkit.Wrappers;
 import com.jixiejia.agent.persistence.entity.ai.AiKnowledgeChunk;
 import com.jixiejia.agent.persistence.entity.ai.AiKnowledgeDoc;
+import com.jixiejia.agent.persistence.entity.ai.AiKnowledgeTable;
 import com.jixiejia.agent.persistence.entity.jxj.CmsArticle;
 import com.jixiejia.agent.persistence.mapper.ai.AiKnowledgeChunkMapper;
 import com.jixiejia.agent.persistence.mapper.ai.AiKnowledgeDocMapper;
+import com.jixiejia.agent.persistence.mapper.ai.AiKnowledgeTableMapper;
 import com.jixiejia.agent.persistence.mapper.jxj.CmsArticleMapper;
 import com.jixiejia.agent.persistence.support.BizFilters;
+import com.jixiejia.agent.rag.parse.ParsedDocument;
+import com.jixiejia.agent.rag.parse.ParsedTable;
 import com.jixiejia.agent.tool.ToolSupport;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -55,6 +59,7 @@ public class KnowledgeIngestionService {
     private final CmsArticleMapper articleMapper;
     private final AiKnowledgeDocMapper docMapper;
     private final AiKnowledgeChunkMapper chunkMapper;
+    private final AiKnowledgeTableMapper tableMapper;
     private final TextChunker chunker;
     private final EmbeddingModel embeddingModel;
     private final ElasticsearchClient es;
@@ -143,7 +148,18 @@ public class KnowledgeIngestionService {
      * @return 需要重建索引的文档；内容没变时返回 null 表示跳过
      */
     private AiKnowledgeDoc upsertDoc(String docType, String sourceId, String title, String text) {
-        String hash = TextChunker.sha256(text);
+        return upsertDoc(docType, sourceId, title, text, text);
+    }
+
+    /**
+     * 同上，但可以单独指定"算什么指纹"。
+     *
+     * <p>为什么要分开：上传文档的正文和表格是分开存的，表格改了正文可能一个字都没变。
+     * 只按正文算指纹的话，表格更新会被当成"内容没变"跳过。
+     */
+    private AiKnowledgeDoc upsertDoc(String docType, String sourceId, String title,
+                                     String text, String hashSource) {
+        String hash = TextChunker.sha256(hashSource);
 
         AiKnowledgeDoc existing = docMapper.selectOne(Wrappers.<AiKnowledgeDoc>lambdaQuery()
                 .eq(AiKnowledgeDoc::getDocType, docType)
@@ -171,52 +187,161 @@ public class KnowledgeIngestionService {
         return doc;
     }
 
+    /**
+     * 上传文档入库（M9）。正文走常规切片，表格走"摘要向量化 + 本体另存"。
+     *
+     * @param sourceId 外部来源主键，由调用方生成并保证稳定（重复上传同一份要能判重）
+     * @return 切片总数（含表格摘要块）；内容没变而跳过时返回 -1
+     */
+    public int ingestUpload(String sourceId, String title, ParsedDocument parsed) throws Exception {
+        if (!knowledgeIndex.available()) {
+            throw new IllegalStateException("Elasticsearch 不可用，无法入库");
+        }
+
+        // 指纹要把表格内容算进去，否则"只改了表格"的重新上传会被误判为没变化
+        StringBuilder hashSource = new StringBuilder(parsed.text());
+        for (ParsedTable t : parsed.tables()) {
+            hashSource.append('\n').append(t.markdown());
+        }
+
+        AiKnowledgeDoc doc = upsertDoc("upload", sourceId, title, parsed.text(), hashSource.toString());
+        if (doc == null) {
+            return -1;
+        }
+        return indexDocument(doc, parsed.text(), parsed.tables());
+    }
+
+    /**
+     * 删除一份知识文档。
+     *
+     * <p>三处都要清，缺一个就等于没删干净：
+     * <ol>
+     *   <li><b>ES 切片</b>——不清的话删完还能被检索到；</li>
+     *   <li><b>MySQL 切片与表格</b>物理删（这两张表没有 {@code @TableLogic}，本就随文档走）；</li>
+     *   <li><b>文档本身</b>走逻辑删（{@code del_flag='2'}），保留"这份文档曾经入库过"的痕迹。</li>
+     * </ol>
+     * 注意最后一步是逻辑删，行还在表里——而 {@code ai_knowledge_chunk} 是按 doc_id 物理删的，
+     * 所以不会留下指向已删文档的孤儿切片。
+     *
+     * @return 文档不存在时返回 false
+     */
+    public boolean deleteDocument(Long docId) throws Exception {
+        AiKnowledgeDoc doc = docMapper.selectById(docId);
+        if (doc == null) {
+            return false;
+        }
+        removeChunks(docId);
+        docMapper.deleteById(docId);
+        return true;
+    }
+
     /** 切片 → 算向量 → 落库 → 建索引。文档内容变了会先清掉旧切片再重建。 */
     private int indexDocument(AiKnowledgeDoc doc, String text) throws Exception {
+        return indexDocument(doc, text, List.of());
+    }
+
+    /**
+     * 切片 → 算向量 → 落库 → 建索引；表格单独存、只把摘要向量化。
+     *
+     * <p><b>表格为什么不跟正文一起切片。</b>跨页大表被切断后，检索只能召回半张表，
+     * 模型拿到缺表头的行会答错。所以表格本体存 {@code ai_knowledge_table} 不参与切片，
+     * 只把"表头 + 标题 + 前几行"当摘要切成一个块，块上带 {@code tableId}；
+     * 检索命中摘要后，再按 id 取回完整表格。
+     */
+    private int indexDocument(AiKnowledgeDoc doc, String text, List<ParsedTable> tables) throws Exception {
         removeChunks(doc.getId());
 
         List<TextChunker.Chunk> chunks = chunker.chunk(text);
-        if (chunks.isEmpty()) {
+        List<TextChunker.Chunk> summaryChunks = indexTables(doc, tables);
+
+        if (chunks.isEmpty() && summaryChunks.isEmpty()) {
             doc.setStatus("FAILED");
             doc.setErrorMsg("切片结果为空");
             docMapper.updateById(doc);
             return 0;
         }
 
-        for (int i = 0; i < chunks.size(); i += EMBED_BATCH) {
-            List<TextChunker.Chunk> batch = chunks.subList(i, Math.min(chunks.size(), i + EMBED_BATCH));
-            List<float[]> vectors = embeddingModel.embed(batch.stream().map(TextChunker.Chunk::content).toList());
-
-            for (int j = 0; j < batch.size(); j++) {
-                saveChunk(doc, batch.get(j), vectors.get(j));
+        int index = 0;
+        for (List<TextChunker.Chunk> batch : List.of(chunks, summaryChunks)) {
+            for (int i = 0; i < batch.size(); i += EMBED_BATCH) {
+                List<TextChunker.Chunk> slice = batch.subList(i, Math.min(batch.size(), i + EMBED_BATCH));
+                List<float[]> vectors = embeddingModel.embed(slice.stream().map(TextChunker.Chunk::content).toList());
+                for (int j = 0; j < slice.size(); j++) {
+                    TextChunker.Chunk c = slice.get(j);
+                    saveChunk(doc, index++, c.content(), c.hash(), c.tableId(), vectors.get(j));
+                }
             }
         }
 
-        doc.setChunkCount(chunks.size());
+        doc.setChunkCount(index);
         doc.setStatus("INDEXED");
         doc.setErrorMsg(null);
         docMapper.updateById(doc);
-        return chunks.size();
+        return index;
+    }
+
+    /**
+     * 表格落库并生成"摘要切片"。
+     *
+     * <p>返回的是待向量化的摘要块清单（每张表一个块）。表本体已经在这步写进
+     * {@code ai_knowledge_table}，块内容用 {@link ParsedTable#summary()}。
+     */
+    private List<TextChunker.Chunk> indexTables(AiKnowledgeDoc doc, List<ParsedTable> tables) {
+        List<TextChunker.Chunk> summaries = new ArrayList<>();
+        if (tables == null || tables.isEmpty()) {
+            return summaries;
+        }
+
+        int seq = 0;
+        for (ParsedTable table : tables) {
+            String summary = table.summary();
+            if (summary.isBlank()) {
+                continue;
+            }
+            String hash = TextChunker.sha256(table.markdown());
+
+            AiKnowledgeTable row = new AiKnowledgeTable();
+            row.setDocId(doc.getId());
+            row.setTableIndex(seq);
+            row.setPageFrom(table.pageFrom());
+            row.setPageTo(table.pageTo());
+            row.setCaption(table.caption());
+            row.setHeaders(String.join(" | ", table.headers()));
+            row.setMarkdown(table.markdown());
+            row.setRowCount(table.rowCount());
+            row.setColCount(table.colCount());
+            row.setContentHash(hash);
+            tableMapper.insert(row);
+
+            summaries.add(new TextChunker.Chunk(seq, summary, TextChunker.sha256(summary), row.getId()));
+            seq++;
+        }
+        return summaries;
     }
 
     /** 一个切片：MySQL 存原文，ES 存副本 + 向量。 */
-    private void saveChunk(AiKnowledgeDoc doc, TextChunker.Chunk chunk, float[] vector) throws Exception {
+    private void saveChunk(AiKnowledgeDoc doc, int chunkIndex, String content, String hash,
+                           Long tableId, float[] vector) throws Exception {
         AiKnowledgeChunk row = new AiKnowledgeChunk();
         row.setDocId(doc.getId());
-        row.setChunkIndex(chunk.index());
-        row.setContent(chunk.content());
-        row.setContentHash(chunk.hash());
-        row.setCharCount(chunk.content().length());
+        row.setChunkIndex(chunkIndex);
+        row.setContent(content);
+        row.setContentHash(hash);
+        row.setCharCount(content.length());
         row.setEmbeddingModel(embeddingModelName);
-        row.setVectorId(KnowledgeIndex.vectorId(doc.getId(), chunk.index()));
+        row.setVectorId(KnowledgeIndex.vectorId(doc.getId(), chunkIndex));
+        row.setTableId(tableId);
         chunkMapper.insert(row);
 
         Map<String, Object> esDoc = new LinkedHashMap<>();
         esDoc.put(KnowledgeIndex.fieldDocId(), doc.getId());
         esDoc.put(KnowledgeIndex.fieldChunkId(), row.getId());
         esDoc.put(KnowledgeIndex.fieldTitle(), doc.getTitle());
-        esDoc.put(KnowledgeIndex.fieldText(), chunk.content());
+        esDoc.put(KnowledgeIndex.fieldText(), content);
         esDoc.put(KnowledgeIndex.fieldVector(), toFloatList(vector));
+        if (tableId != null) {
+            esDoc.put(KnowledgeIndex.fieldTableId(), tableId);
+        }
 
         es.index(idx -> idx
                 .index(KnowledgeIndex.NAME)
@@ -375,10 +500,13 @@ public class KnowledgeIngestionService {
         return removed;
     }
 
-    /** 删掉某文档的所有切片，MySQL 与 ES 两边都清，避免留下查得到但已失效的旧内容。 */
+    /** 删掉某文档的所有切片与表格，MySQL 与 ES 两边都清，避免留下查得到但已失效的旧内容。 */
     private void removeChunks(Long docId) throws Exception {
         chunkMapper.delete(Wrappers.<AiKnowledgeChunk>lambdaQuery()
                 .eq(AiKnowledgeChunk::getDocId, docId));
+        // 表格本体也要跟着走：它是按文档存的，文档重建索引时旧表格不清会越攒越多
+        tableMapper.delete(Wrappers.<AiKnowledgeTable>lambdaQuery()
+                .eq(AiKnowledgeTable::getDocId, docId));
 
         es.deleteByQuery(d -> d
                 .index(KnowledgeIndex.NAME)

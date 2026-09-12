@@ -1,0 +1,296 @@
+package com.jixiejia.agent.rag;
+
+import com.jixiejia.agent.rag.parse.DocumentParseException;
+import com.jixiejia.agent.rag.parse.DocumentParser;
+import com.jixiejia.agent.rag.parse.MarkdownTableExtractor;
+import com.jixiejia.agent.rag.parse.ParsedDocument;
+import com.jixiejia.agent.rag.parse.ParsedTable;
+import org.junit.jupiter.api.DisplayName;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.test.context.SpringBootTest;
+
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.List;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+
+/**
+ * 文档解析与表格抽取。
+ *
+ * <p>分两类：
+ * <ul>
+ *   <li><b>纯逻辑</b>——表格识别与校验（含把公式假表格挡掉），不依赖任何外部进程；</li>
+ *   <li><b>真解析</b>——拿真实的国标 PDF 跑一遍 LiteParse，标了
+ *       {@code -Dparse.eval=true} 才跑（要起进程、要网络、慢）。</li>
+ * </ul>
+ */
+class DocumentUploadTest {
+
+    // ---------------- 纯逻辑：表格识别 ----------------
+
+    @Test
+    @DisplayName("表格识别：正常的 markdown 表能认出来")
+    void extractsRealTable() {
+        List<String> lines = List.of(
+                "6.1.2 试验条件",
+                "| 测量参数 | 准确度 |",
+                "|---|---|",
+                "| 电压/V | ±1% |",
+                "| 电流/A | ±1% |",
+                "| 电能消耗量/kW·h | ±2% |");
+
+        List<MarkdownTableExtractor.Block> blocks = MarkdownTableExtractor.extract(lines);
+
+        assertThat(blocks).hasSize(1);
+        assertThat(blocks.get(0).headers()).containsExactly("测量参数", "准确度");
+        assertThat(blocks.get(0).rows()).hasSize(3);
+    }
+
+    @Test
+    @DisplayName("表格识别：公式被版面算法误拼成的假表格必须挡掉")
+    void rejectsFormulaLookalikeTable() {
+        // 实测：国标 PDF 里的公式会被识别成"表格"，格式完全合法（有表头、有分隔行、列数一致），
+        // 只有内容看着是公式。照单全收的话，库里的"表格"会全是公式。
+        List<String> lines = List.of(
+                "| Ein回转 =∑ i=1∫ n | t2 Uin回转 Iin回转dt t1 | …………………………(1) |",
+                "|---|---|---|",
+                "| Eout回转 =∑ i=1∫ n | t2 Uout回转 Iout回转dt t1 | …………………………(2) …………………………(3) |");
+
+        assertThat(MarkdownTableExtractor.extract(lines))
+                .as("公式拼出来的假表格不该被当成表格")
+                .isEmpty();
+    }
+
+    @Test
+    @DisplayName("表格识别：只有一行数据的表按当前策略不收（挡住假表格的代价）")
+    void rejectsSingleDataRowTable() {
+        List<String> lines = List.of(
+                "| 设备名称 | 规格 |",
+                "|---|---|",
+                "| 挖掘机 | 20 吨 |");
+
+        // 这是刻意的取舍：假表格几乎都只有 1 行数据，去掉它能把误判挡掉一大半，
+        // 代价是漏掉"真的只有一行"的表。有文档记录这个边界。
+        assertThat(MarkdownTableExtractor.extract(lines)).isEmpty();
+    }
+
+    @Test
+    @DisplayName("表格识别：列数与表头对不上的残块不收")
+    void rejectsInconsistentColumns() {
+        List<String> lines = List.of(
+                "| A | B | C |",
+                "|---|---|---|",
+                "| 1 | 2 | 3 |",
+                "| 4 | 5 |",
+                "| 6 | 7 | 8 |");
+
+        assertThat(MarkdownTableExtractor.extract(lines)).isEmpty();
+    }
+
+    @Test
+    @DisplayName("表格识别：从正文里剔除表格时，表格行被去掉、其它文字保留")
+    void removesTableBlocksFromText() {
+        List<String> lines = List.of(
+                "前面的说明文字",
+                "| 参数 | 值 |",
+                "|---|---|",
+                "| 电压 | 220V |",
+                "| 电流 | 5A |",
+                "后面的文字");
+
+        var blocks = MarkdownTableExtractor.extract(lines);
+        String body = MarkdownTableExtractor.removeTableBlocks(lines, blocks);
+
+        assertThat(blocks).hasSize(1);
+        assertThat(body).contains("前面的说明文字").contains("后面的文字");
+        assertThat(body).doesNotContain("电压").doesNotContain("|---|---|");
+    }
+
+    @Test
+    @DisplayName("表格摘要：包含表头与前几行，超出的部分只报行数")
+    void tableSummaryKeepsHeaderAndSamples() {
+        List<List<String>> rows = new java.util.ArrayList<>();
+        for (int i = 1; i <= 20; i++) {
+            rows.add(List.of("行" + i, "值" + i));
+        }
+        ParsedTable table = new ParsedTable(0, 1, 2, "试验参数表",
+                List.of("项目", "取值"), rows, "");
+
+        String summary = table.summary();
+
+        assertThat(summary).contains("试验参数表").contains("项目 | 取值");
+        assertThat(summary).contains("行1 | 值1");
+        assertThat(summary).as("超出样例数的部分只报个数，不把整张表塞进向量").contains("共 20 行");
+        assertThat(summary).doesNotContain("行20");
+    }
+
+    // ---------------- 跨页表格合并 ----------------
+
+    @Test
+    @DisplayName("跨页合并：带页眉页脚的续表要能接成一张")
+    void mergesTableAcrossPagesWithHeaderFooter() {
+        // 这是真实国标 PDF 的形态：每页顶部有页眉、底部有页码，表格夹在中间。
+        // 最初判据要求"表格必须紧贴页面首/尾"，于是这种续表一次都没合并成。
+        String page1 = """
+                GB/T 45095—2024
+                表4 检验项目
+                | 序号 | 检验项目 | 单位 | 限值 | 备注 |
+                |---|---|---|---|---|
+                | 1 | 绝缘电阻 | MΩ | ≥1 | |
+                | 2 | 耐压 | V | 1500 | |
+
+                6""";
+        String page2 = """
+                GB/T 45095—2024
+                | 序号 | 检验项目 | 单位 | 限值 | 备注 |
+                |---|---|---|---|---|
+                | 3 | 温升 | K | ≤80 | |
+                | 4 | 噪声 | dB | ≤85 | |
+
+                7""";
+
+        List<String> warnings = new java.util.ArrayList<>();
+        List<ParsedTable> tables = DocumentParser.extractTablesFromPages(
+                List.of(page1, page2), warnings);
+
+        assertThat(tables).as("两页上的同列表格应当合并成一张").hasSize(1);
+        ParsedTable merged = tables.get(0);
+        assertThat(merged.rowCount()).as("数据行应当接起来（2+2）").isEqualTo(4);
+        assertThat(merged.pageFrom()).isEqualTo(1);
+        assertThat(merged.pageTo()).isEqualTo(2);
+        assertThat(merged.rows().get(2)).containsExactly("3", "温升", "K", "≤80", "");
+        assertThat(warnings).anyMatch(w -> w.contains("合并"));
+    }
+
+    @Test
+    @DisplayName("跨页合并：列数不同则不合并（不是同一张表）")
+    void doesNotMergeTablesWithDifferentColumns() {
+        String page1 = """
+                表A
+                | 甲 | 乙 |
+                |---|---|
+                | 1 | 2 |
+                | 3 | 4 |
+
+                1""";
+        String page2 = """
+                表B
+                | 甲 | 乙 | 丙 |
+                |---|---|---|
+                | 5 | 6 | 7 |
+                | 8 | 9 | 10 |
+
+                2""";
+
+        List<ParsedTable> tables = DocumentParser.extractTablesFromPages(
+                List.of(page1, page2), new java.util.ArrayList<>());
+
+        assertThat(tables).hasSize(2);
+    }
+
+    @Test
+    @DisplayName("跨页合并：上一页表格后面还有大段正文，就不该往下接")
+    void doesNotMergeWhenTableIsNotAtPageEnd() {
+        String page1 = """
+                表A
+                | 甲 | 乙 |
+                |---|---|
+                | 1 | 2 |
+                | 3 | 4 |
+
+                这里还有好几行正文说明，说明上一页的表已经结束了，
+                后面这些文字跟表格没有关系。
+                继续写下去，让非空行超过容忍度。
+
+                1""";
+        String page2 = """
+                | 甲 | 乙 |
+                |---|---|
+                | 5 | 6 |
+                | 7 | 8 |
+
+                2""";
+
+        List<ParsedTable> tables = DocumentParser.extractTablesFromPages(
+                List.of(page1, page2), new java.util.ArrayList<>());
+
+        assertThat(tables).as("上一页表格后面还有正文，说明表已结束，不该合并").hasSize(2);
+    }
+
+    // ---------------- 输入校验 ----------------
+
+    @Test
+    @DisplayName("不支持的文件类型要有可读的报错，而不是抛原始异常")
+    void rejectsUnsupportedExtension() {
+        // 这个用例不需要 Spring 容器：解析器在检查扩展名时就返回了，
+        // 两个外部客户端传 null 也不会被用到
+        DocumentParser parser = new DocumentParser(null, null);
+
+        assertThatThrownBy(() -> parser.parse("资料.exe", new byte[]{1, 2, 3}))
+                .isInstanceOf(DocumentParseException.class)
+                .hasMessageContaining("暂不支持的文件类型");
+    }
+
+    @Test
+    @DisplayName("空文件被拒绝")
+    void rejectsEmptyFile() {
+        DocumentParser parser = new DocumentParser(null, null);
+
+        assertThatThrownBy(() -> parser.parse("a.txt", new byte[0]))
+                .isInstanceOf(DocumentParseException.class)
+                .hasMessageContaining("内容为空");
+    }
+
+    @Test
+    @DisplayName("扩展名解析：大小写、无扩展名、路径分隔符")
+    void parsesExtension() {
+        assertThat(DocumentParser.extensionOf("A.PDF")).isEqualTo("pdf");
+        assertThat(DocumentParser.extensionOf("无扩展名")).isEmpty();
+        assertThat(DocumentParser.extensionOf("a.")).isEmpty();
+        assertThat(DocumentParser.extensionOf("x.tar.gz")).isEqualTo("gz");
+    }
+
+    // ---------------- 真解析（可选） ----------------
+
+    /**
+     * 拿仓库里 file/ 下的国标 PDF 真跑一遍。
+     *
+     * <p>默认不跑：要起 LiteParse 进程、要几十秒，而且换台机器就没有这些样本了。
+     * 需要时：
+     * <pre>
+     *   mvn test -Dtest=DocumentUploadTest -Dparse.eval=true
+     * </pre>
+     */
+    @SpringBootTest
+    @EnabledIfSystemProperty(named = "parse.eval", matches = "true")
+    static class RealDocumentTest {
+
+        @Autowired
+        private DocumentParser parser;
+
+        @Test
+        @DisplayName("真解析：国标 PDF 能抽出表格，并给出页数/OCR 页数")
+        void parsesRealStandardPdf() throws Exception {
+            Path pdf = Path.of("file/GBT+45095-2024.pdf");
+            org.junit.jupiter.api.Assumptions.assumeTrue(Files.exists(pdf), "样本不存在，跳过");
+
+            ParsedDocument doc = parser.parse(pdf.getFileName().toString(), Files.readAllBytes(pdf));
+
+            System.out.printf("%n[真解析] 页数=%d  OCR页数=%d  表格数=%d  正文长度=%d%n",
+                    doc.pageCount(), doc.ocrPages(), doc.tables().size(), doc.text().length());
+            for (ParsedTable t : doc.tables()) {
+                System.out.printf("  表%d: 第%d-%d页 %d行×%d列  标题=%s%n",
+                        t.tableIndex() + 1, t.pageFrom(), t.pageTo(), t.rowCount(), t.colCount(),
+                        t.caption() == null ? "(无)" : t.caption());
+            }
+            doc.warnings().forEach(w -> System.out.println("  警告: " + w));
+
+            assertThat(doc.pageCount()).isPositive();
+            assertThat(doc.tables()).as("国标文档里应当能认出表格").isNotEmpty();
+        }
+    }
+}

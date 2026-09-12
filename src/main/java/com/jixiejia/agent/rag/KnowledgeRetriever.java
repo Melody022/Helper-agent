@@ -56,10 +56,20 @@ public class KnowledgeRetriever {
      * @param rrfScore    融合后的得分，用于排序
      * @param vectorScore 向量相似度 0~1，用于证据闸判断"资料到底相不相关"
      * @param bm25Score   关键词得分，无上界，仅供排查
+     * @param tableId     非空表示这条是某张表的<b>摘要</b>；生成前必须按这个 id 取回完整表格，
+     *                    否则模型只看到表头和前几行，答出来的数据是错的
      */
     public record Hit(String vectorId, Long docId, Long chunkId, String title, String content,
                       double rrfScore, double vectorScore, double bm25Score,
-                      int bm25Rank, int knnRank) {
+                      int bm25Rank, int knnRank, Long tableId) {
+
+        /** 不带表格信息的便捷构造：普通正文块。 */
+        public Hit(String vectorId, Long docId, Long chunkId, String title, String content,
+                   double rrfScore, double vectorScore, double bm25Score,
+                   int bm25Rank, int knnRank) {
+            this(vectorId, docId, chunkId, title, content, rrfScore, vectorScore, bm25Score,
+                    bm25Rank, knnRank, null);
+        }
     }
 
     /**
@@ -111,7 +121,8 @@ public class KnowledgeRetriever {
                     stringOf(source.get(KnowledgeIndex.fieldTitle())),
                     stringOf(source.get(KnowledgeIndex.fieldText())),
                     0, 0, hit.score() == null ? 0 : hit.score(),
-                    rank, -1));
+                    rank, -1,
+                    longOf(source.get(KnowledgeIndex.fieldTableId()))));
         }
         return hits;
     }
@@ -148,7 +159,8 @@ public class KnowledgeRetriever {
                     stringOf(source.get(KnowledgeIndex.fieldTitle())),
                     stringOf(source.get(KnowledgeIndex.fieldText())),
                     0, hit.score() == null ? 0 : hit.score(), 0,
-                    -1, rank));
+                    -1, rank,
+                    longOf(source.get(KnowledgeIndex.fieldTableId()))));
         }
         return hits;
     }
@@ -174,7 +186,7 @@ public class KnowledgeRetriever {
                     Hit base = merged.get(e.getKey());
                     return new Hit(base.vectorId(), base.docId(), base.chunkId(), base.title(),
                             base.content(), e.getValue(), base.vectorScore(), base.bm25Score(),
-                            base.bm25Rank(), base.knnRank());
+                            base.bm25Rank(), base.knnRank(), base.tableId());
                 })
                 .sorted(Comparator.comparingDouble(Hit::rrfScore).reversed())
                 .limit(topK)
@@ -188,7 +200,8 @@ public class KnowledgeRetriever {
                 vectorSide.title() != null ? vectorSide.title() : keywordSide.title(),
                 vectorSide.content() != null ? vectorSide.content() : keywordSide.content(),
                 0, vectorSide.vectorScore(), keywordSide.bm25Score(),
-                keywordSide.bm25Rank(), vectorSide.knnRank());
+                keywordSide.bm25Rank(), vectorSide.knnRank(),
+                vectorSide.tableId() != null ? vectorSide.tableId() : keywordSide.tableId());
     }
 
     private static Long longOf(Object value) {

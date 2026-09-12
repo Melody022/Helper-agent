@@ -11,19 +11,27 @@ import com.jixiejia.agent.persistence.mapper.ai.AiFlywheelCandidateMapper;
 import com.jixiejia.agent.persistence.mapper.ai.AiKnowledgeDocMapper;
 import com.jixiejia.agent.rag.KnowledgeIndex;
 import com.jixiejia.agent.rag.KnowledgeIngestionService;
+import com.jixiejia.agent.rag.TextChunker;
+import com.jixiejia.agent.rag.parse.DocumentParseException;
+import com.jixiejia.agent.rag.parse.DocumentParser;
+import com.jixiejia.agent.rag.parse.ParsedDocument;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.HttpStatus;
+import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
+import org.springframework.web.bind.annotation.RequestPart;
 import org.springframework.web.bind.annotation.RestController;
+import org.springframework.web.multipart.MultipartFile;
 
 import java.time.LocalDateTime;
 import java.util.LinkedHashMap;
@@ -44,6 +52,7 @@ import java.util.Map;
 public class AdminKnowledgeController {
 
     private final KnowledgeIngestionService ingestionService;
+    private final DocumentParser documentParser;
     private final AiFlywheelCandidateMapper flywheelMapper;
     private final AiKnowledgeDocMapper docMapper;
 
@@ -77,7 +86,103 @@ public class AdminKnowledgeController {
         Map<String, Object> result = new LinkedHashMap<>();
         result.put("indexedDocs", docs);
         result.put("esIndexName", KnowledgeIndex.NAME);
+        result.put("supportedFileTypes", DocumentParser.supportedExtensions());
         return ResponseEntity.ok(result);
+    }
+
+    @Operation(summary = "上传文档入库",
+            description = "支持 PDF / Word / Excel / PPT / 图片 / md / txt / csv。"
+                    + "PDF 与 Office 走本地 LiteParse 解析（快、免费），扫描页才走多模态 OCR（按量计费）")
+    @PostMapping(value = "/upload", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
+    public ResponseEntity<?> upload(@RequestPart("file") MultipartFile file,
+                                    @RequestParam(required = false) String title) {
+        if (file == null || file.isEmpty()) {
+            return ResponseEntity.badRequest().body(Map.of("code", 400, "message", "请选择要上传的文件"));
+        }
+
+        try {
+            byte[] bytes = file.getBytes();
+            String filename = file.getOriginalFilename();
+            ParsedDocument parsed = documentParser.parse(filename, bytes);
+
+            if (parsed.text().isBlank() && parsed.tables().isEmpty()) {
+                return ResponseEntity.badRequest().body(Map.of("code", 400,
+                        "message", "这份文档没有解析出任何文字内容"
+                                + (parsed.warnings().isEmpty() ? "" : "：" + String.join("；", parsed.warnings()))));
+            }
+
+            // sourceId 用内容指纹：同一份文件重复上传会被入库查重跳过，不会堆重复文档
+            String sourceId = "upload-" + TextChunker.sha256(bytes).substring(0, 16);
+            String docTitle = (title == null || title.isBlank()) ? parsed.title() : title.trim();
+
+            int chunks = ingestionService.ingestUpload(sourceId, docTitle, parsed);
+            if (chunks < 0) {
+                return ResponseEntity.ok(Map.of("code", 200, "message",
+                        "这份文档内容和库里已有的完全一致，已跳过（没有重复入库）"));
+            }
+
+            Map<String, Object> body = new LinkedHashMap<>();
+            body.put("code", 200);
+            body.put("message", "入库成功");
+            body.put("title", docTitle);
+            body.put("chunks", chunks);
+            body.put("tables", parsed.tables().size());
+            body.put("pageCount", parsed.pageCount());
+            body.put("ocrPages", parsed.ocrPages());
+            body.put("warnings", parsed.warnings());
+            return ResponseEntity.ok(body);
+
+        } catch (DocumentParseException e) {
+            // 解析类失败是"用户能看懂并自己修"的（格式不支持、没装 LibreOffice、页数超限），
+            // 用 400 而不是 500
+            return ResponseEntity.badRequest().body(Map.of("code", 400, "message", e.getMessage()));
+        } catch (Exception e) {
+            log.error("上传入库失败", e);
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
+                    .body(Map.of("code", 500, "message", "入库失败：" + e.getMessage()));
+        }
+    }
+
+    @Operation(summary = "已入库文档列表", description = "走 MySQL 查询（ES 索引里没存 docType，过滤不了来源）")
+    @GetMapping("/docs")
+    public ResponseEntity<?> docs(@RequestParam(defaultValue = "50") int limit,
+                                  @RequestParam(defaultValue = "") String keyword) {
+        var query = Wrappers.<AiKnowledgeDoc>lambdaQuery()
+                .orderByDesc(AiKnowledgeDoc::getId)
+                .last("limit " + Math.max(1, Math.min(limit, 200)));
+        if (!keyword.isBlank()) {
+            query.like(AiKnowledgeDoc::getTitle, keyword);
+        }
+
+        List<Map<String, Object>> rows = docMapper.selectList(query).stream().map(d -> {
+            Map<String, Object> row = new LinkedHashMap<>();
+            row.put("id", d.getId());
+            row.put("docType", d.getDocType());
+            row.put("title", d.getTitle());
+            row.put("sourceId", d.getSourceId());
+            row.put("status", d.getStatus());
+            row.put("chunkCount", d.getChunkCount());
+            row.put("createTime", d.getCreateTime());
+            return row;
+        }).toList();
+        return ResponseEntity.ok(rows);
+    }
+
+    @Operation(summary = "删除文档", description = "同时清掉 ES 切片与 MySQL 切片/表格；文档本身逻辑删除")
+    @DeleteMapping("/docs/{id}")
+    public ResponseEntity<?> deleteDoc(@PathVariable Long id) {
+        try {
+            boolean deleted = ingestionService.deleteDocument(id);
+            if (!deleted) {
+                return ResponseEntity.status(HttpStatus.NOT_FOUND)
+                        .body(Map.of("code", 404, "message", "文档不存在：" + id));
+            }
+            return ResponseEntity.ok(Map.of("code", 200, "message", "已删除，相关切片与表格已从索引中清除"));
+        } catch (Exception e) {
+            log.error("删除文档失败：{}", id, e);
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
+                    .body(Map.of("code", 500, "message", "删除失败：" + e.getMessage()));
+        }
     }
 
     @Operation(summary = "索引对账",

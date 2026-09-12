@@ -42,5 +42,13 @@ public class AiKnowledgeChunk {
     /** ES 里的文档 id */
     private String vectorId;
 
+    /**
+     * 命中的表格 id（ai_knowledge_table.id），非表格块为 null。
+     *
+     * <p>带这个值的切片是某张表的<b>摘要</b>。检索命中它之后，要用完整表格替换掉
+     * 摘要内容再喂给模型——只召回摘要等于只给模型看表头，答不对。
+     */
+    private Long tableId;
+
     private LocalDateTime createTime;
 }

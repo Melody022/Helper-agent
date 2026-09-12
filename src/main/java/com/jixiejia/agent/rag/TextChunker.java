@@ -39,8 +39,18 @@ public class TextChunker {
         this.overlapChars = overlapChars;
     }
 
-    /** 一个切好的块。 */
-    public record Chunk(int index, String content, String hash) {
+    /**
+     * 一个切好的块。
+     *
+     * @param tableId 非空表示这是某张表的<b>摘要块</b>；检索命中它之后要按这个 id
+     *                去 {@code ai_knowledge_table} 取回完整表格，不能只把摘要喂给模型
+     */
+    public record Chunk(int index, String content, String hash, Long tableId) {
+
+        /** 普通正文块，不关联表格。 */
+        public Chunk(int index, String content, String hash) {
+            this(index, content, hash, null);
+        }
     }
 
     /** 把正文切成若干块。空白或无有效内容时返回空列表。 */
@@ -135,10 +145,14 @@ public class TextChunker {
 
     /** 内容指纹，用于入库查重与"内容没变就跳过"的判断。 */
     public static String sha256(String text) {
+        return sha256(text.getBytes(StandardCharsets.UTF_8));
+    }
+
+    /** 内容指纹（字节版）：对上传的原始文件判重时用，不必先转成字符串。 */
+    public static String sha256(byte[] bytes) {
         try {
             MessageDigest digest = MessageDigest.getInstance("SHA-256");
-            byte[] hash = digest.digest(text.getBytes(StandardCharsets.UTF_8));
-            return HexFormat.of().formatHex(hash);
+            return HexFormat.of().formatHex(digest.digest(bytes));
         } catch (Exception e) {
             throw new IllegalStateException("计算内容指纹失败", e);
         }

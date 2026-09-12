@@ -43,3 +43,6 @@ logs/
 uploads/
 temp/
 .tmp/
+
+# 用户提供的测试样本文档（国标 PDF 等），体积大且非项目代码，不入库
+file/

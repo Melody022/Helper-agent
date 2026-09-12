@@ -1,0 +1,488 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>机械家 · 知识库管理台</title>
+<style>
+    :root {
+        --bg: #f5f6f8;
+        --panel: #ffffff;
+        --border: #e3e5e9;
+        --text: #1f2329;
+        --muted: #8a9099;
+        --brand: #d97706;
+        --brand-soft: #fef3e2;
+        --danger: #dc2626;
+        --ok: #16a34a;
+    }
+    * { box-sizing: border-box; }
+    body {
+        margin: 0; background: var(--bg); color: var(--text);
+        font-family: -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+        font-size: 14px; line-height: 1.6;
+    }
+
+    /* ---------- 登录 ---------- */
+    #login { display: flex; align-items: center; justify-content: center; min-height: 100vh; }
+    .login-card {
+        background: var(--panel); border: 1px solid var(--border); border-radius: 12px;
+        padding: 32px 28px; width: 340px; box-shadow: 0 2px 12px rgba(0,0,0,.05);
+    }
+    .login-card h1 { font-size: 18px; margin: 0 0 4px; }
+    .login-card p { color: var(--muted); margin: 0 0 20px; font-size: 13px; }
+    .login-card input {
+        width: 100%; padding: 10px 12px; margin-bottom: 12px; font-size: 14px;
+        border: 1px solid var(--border); border-radius: 8px; outline: none;
+    }
+    .login-card input:focus { border-color: var(--brand); }
+    .login-card button {
+        width: 100%; padding: 11px; border: none; border-radius: 8px; cursor: pointer;
+        background: var(--brand); color: #fff; font-size: 14px; font-weight: 500;
+    }
+    .login-card button:hover { background: #c2690a; }
+    .login-card button:disabled { background: #ccc; cursor: not-allowed; }
+
+    /* ---------- 主界面 ---------- */
+    #app { display: none; }
+    header {
+        background: var(--panel); border-bottom: 1px solid var(--border);
+        padding: 12px 24px; display: flex; align-items: center; gap: 12px;
+        position: sticky; top: 0; z-index: 10;
+    }
+    header h1 { font-size: 16px; margin: 0; }
+    header .spacer { flex: 1; }
+    header .who { color: var(--muted); font-size: 13px; }
+    header button {
+        padding: 6px 12px; border: 1px solid var(--border); background: var(--panel);
+        border-radius: 6px; cursor: pointer; font-size: 13px;
+    }
+    header button:hover { border-color: var(--brand); color: var(--brand); }
+
+    .tabs { display: flex; gap: 4px; padding: 16px 24px 0; }
+    .tabs button {
+        padding: 8px 16px; border: 1px solid transparent; border-bottom: none;
+        background: transparent; cursor: pointer; font-size: 14px; border-radius: 8px 8px 0 0;
+        color: var(--muted);
+    }
+    .tabs button.active {
+        background: var(--panel); border-color: var(--border); color: var(--text);
+        font-weight: 500;
+    }
+
+    main { padding: 0 24px 40px; }
+    .panel {
+        background: var(--panel); border: 1px solid var(--border); border-radius: 0 12px 12px 12px;
+        padding: 20px 22px; min-height: 380px;
+    }
+    .panel h2 { font-size: 15px; margin: 0 0 14px; }
+    .hint { color: var(--muted); font-size: 13px; margin: 0 0 14px; }
+
+    .stat-row { display: flex; gap: 28px; margin-bottom: 8px; }
+    .stat { }
+    .stat .n { font-size: 26px; font-weight: 600; color: var(--brand); }
+    .stat .l { color: var(--muted); font-size: 12px; }
+
+    /* ---------- 上传 ---------- */
+    .drop {
+        border: 2px dashed var(--border); border-radius: 10px; padding: 28px;
+        text-align: center; color: var(--muted); cursor: pointer; margin-bottom: 14px;
+        transition: .15s;
+    }
+    .drop:hover, .drop.over { border-color: var(--brand); background: var(--brand-soft); color: var(--brand); }
+    .drop strong { display: block; color: var(--text); font-size: 14px; margin-bottom: 4px; }
+    .row { display: flex; gap: 10px; align-items: center; margin-bottom: 12px; }
+    .row input[type=text] {
+        flex: 1; padding: 9px 12px; border: 1px solid var(--border); border-radius: 8px;
+        font-size: 14px; outline: none;
+    }
+    .row input[type=text]:focus { border-color: var(--brand); }
+    .btn {
+        padding: 9px 18px; border: none; border-radius: 8px; background: var(--brand);
+        color: #fff; cursor: pointer; font-size: 14px; white-space: nowrap;
+    }
+    .btn:hover { background: #c2690a; }
+    .btn:disabled { background: #ccc; cursor: not-allowed; }
+    .btn.ghost { background: var(--panel); border: 1px solid var(--border); color: var(--text); }
+    .btn.ghost:hover { border-color: var(--brand); color: var(--brand); background: var(--panel); }
+    .btn.danger { background: var(--danger); }
+    .btn.danger:hover { background: #b91c1c; }
+
+    .result { margin-top: 14px; padding: 12px 14px; border-radius: 8px; font-size: 13px; display: none; }
+    .result.show { display: block; }
+    .result.ok { background: #f0fdf4; border: 1px solid #bbf7d0; color: #166534; }
+    .result.err { background: #fef2f2; border: 1px solid #fecaca; color: #991b1b; }
+    .result ul { margin: 6px 0 0; padding-left: 18px; }
+
+    /* ---------- 表格 ---------- */
+    table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    th, td { text-align: left; padding: 9px 10px; border-bottom: 1px solid var(--border); }
+    th { color: var(--muted); font-weight: 500; font-size: 12px; }
+    tbody tr:hover { background: #fafbfc; }
+    .tag {
+        display: inline-block; padding: 1px 7px; border-radius: 4px; font-size: 12px;
+        background: var(--brand-soft); color: var(--brand);
+    }
+    .tag.muted { background: #f1f2f4; color: var(--muted); }
+    .empty { color: var(--muted); text-align: center; padding: 40px 0; font-size: 13px; }
+    .loading { color: var(--muted); font-size: 13px; }
+    .q { max-width: 420px; }
+    .spin {
+        display: inline-block; width: 13px; height: 13px; border: 2px solid rgba(255,255,255,.4);
+        border-top-color: #fff; border-radius: 50%; animation: sp .7s linear infinite;
+        vertical-align: -2px; margin-right: 6px;
+    }
+    @keyframes sp { to { transform: rotate(360deg); } }
+</style>
+</head>
+<body>
+
+<div id="login">
+    <div class="login-card">
+        <h1>知识库管理台</h1>
+        <p>需要管理员账号登录</p>
+        <input id="username" placeholder="账号" autocomplete="username">
+        <input id="password" type="password" placeholder="密码" autocomplete="current-password">
+        <button id="loginBtn">登 录</button>
+        <p id="loginErr" style="color:#dc2626;margin:10px 0 0;min-height:18px"></p>
+    </div>
+</div>
+
+<div id="app">
+    <header>
+        <h1>知识库管理台</h1>
+        <span class="spacer"></span>
+        <span class="who" id="who"></span>
+        <button id="logoutBtn">退出</button>
+    </header>
+
+    <div class="tabs">
+        <button data-tab="stats" class="active">概况</button>
+        <button data-tab="upload">上传文档</button>
+        <button data-tab="docs">文档列表</button>
+        <button data-tab="flywheel">飞轮待审</button>
+    </div>
+
+    <main>
+        <div class="panel" id="panel"></div>
+    </main>
+</div>
+
+<script>
+const state = { token: null, user: null, tab: 'stats', file: null };
+
+const $ = (id) => document.getElementById(id);
+
+// ---------------- 请求封装 ----------------
+async function api(path, options = {}) {
+    const opts = { ...options, headers: { ...(options.headers || {}) } };
+    if (state.token) opts.headers['Authorization'] = 'Bearer ' + state.token;
+    if (opts.body && !(opts.body instanceof FormData)) {
+        opts.headers['Content-Type'] = 'application/json';
+    }
+    const res = await fetch(path, opts);
+    if (res.status === 401) { doLogout(); throw new Error('登录已过期，请重新登录'); }
+    const text = await res.text();
+    let data;
+    try { data = text ? JSON.parse(text) : null; } catch { data = { message: text }; }
+    if (!res.ok) throw new Error((data && (data.message || data.error)) || ('请求失败 ' + res.status));
+    return data;
+}
+
+// ---------------- 登录 ----------------
+$('loginBtn').onclick = doLogin;
+$('password').onkeydown = (e) => { if (e.key === 'Enter') doLogin(); };
+
+async function doLogin() {
+    const username = $('username').value.trim();
+    const password = $('password').value;
+    if (!username || !password) { $('loginErr').textContent = '请输入账号和密码'; return; }
+
+    $('loginBtn').disabled = true;
+    $('loginErr').textContent = '';
+    try {
+        const data = await api('/api/auth/login', {
+            method: 'POST',
+            body: JSON.stringify({ username, password })
+        });
+        state.token = data.token;
+        state.user = data.user;
+        showApp();
+    } catch (e) {
+        $('loginErr').textContent = e.message;
+    } finally {
+        $('loginBtn').disabled = false;
+    }
+}
+
+function doLogout() {
+    state.token = null; state.user = null; state.file = null;
+    $('app').style.display = 'none';
+    $('login').style.display = 'flex';
+    $('password').value = '';
+}
+
+$('logoutBtn').onclick = doLogout;
+
+function showApp() {
+    $('login').style.display = 'none';
+    $('app').style.display = 'block';
+    const u = state.user || {};
+    $('who').textContent = (u.username || '') + (u.roles ? '（' + u.roles.join('/') + '）' : '');
+    render();
+}
+
+// ---------------- Tab 切换 ----------------
+document.querySelectorAll('.tabs button').forEach(btn => {
+    btn.onclick = () => {
+        document.querySelectorAll('.tabs button').forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
+        state.tab = btn.dataset.tab;
+        render();
+    };
+});
+
+function render() {
+    const p = $('panel');
+    if (state.tab === 'stats') renderStats(p);
+    else if (state.tab === 'upload') renderUpload(p);
+    else if (state.tab === 'docs') renderDocs(p);
+    else if (state.tab === 'flywheel') renderFlywheel(p);
+}
+
+// ---------------- 概况 ----------------
+async function renderStats(p) {
+    p.innerHTML = '<h2>知识库概况</h2><div class="loading">加载中…</div>';
+    try {
+        const s = await api('/api/admin/knowledge/stats');
+        p.innerHTML = `
+            <h2>知识库概况</h2>
+            <div class="stat-row">
+                <div class="stat"><div class="n">${s.indexedDocs ?? 0}</div><div class="l">已入库文档</div></div>
+                <div class="stat"><div class="n">${s.esIndexName ?? '-'}</div><div class="l">ES 索引</div></div>
+            </div>
+            <p class="hint" style="margin-top:20px">
+                支持上传：${s.supportedFileTypes || ''}<br>
+                入库后即可在聊天页提问，检索命中后由证据闸判断资料是否足够。
+            </p>
+            <button class="btn ghost" id="ingestBtn">把平台文章与内置规则重新入库</button>
+            <div class="result" id="ingestResult"></div>`;
+        $('ingestBtn').onclick = async () => {
+            const box = $('ingestResult');
+            $('ingestBtn').disabled = true;
+            box.className = 'result show ok';
+            box.textContent = '正在入库…';
+            try {
+                const r = await api('/api/admin/knowledge/ingest', { method: 'POST' });
+                box.textContent = `完成：文章新增 ${r.articles?.ingested ?? 0} 篇（切片 ${r.articles?.chunks ?? 0}），`
+                    + `内置规则新增 ${r.builtinFaq?.ingested ?? 0} 条`;
+            } catch (e) {
+                box.className = 'result show err';
+                box.textContent = '失败：' + e.message;
+            } finally {
+                $('ingestBtn').disabled = false;
+            }
+        };
+    } catch (e) {
+        p.innerHTML = `<h2>知识库概况</h2><div class="result show err">加载失败：${e.message}</div>`;
+    }
+}
+
+// ---------------- 上传 ----------------
+function renderUpload(p) {
+    p.innerHTML = `
+        <h2>上传文档</h2>
+        <p class="hint">
+            支持 PDF、Word、Excel、PPT、图片、md / txt / csv。<br>
+            PDF 与 Office 走本地解析（快、免费）；<strong>扫描件才会调用多模态 OCR</strong>（慢，按量计费），
+            单次最多 <span id="ocrCap">50</span> 页。
+        </p>
+        <div class="drop" id="drop">
+            <strong>点击选择文件，或把文件拖到这里</strong>
+            <span id="fileName">未选择文件</span>
+        </div>
+        <input type="file" id="fileInput" style="display:none"
+               accept=".pdf,.docx,.doc,.xlsx,.xls,.pptx,.odt,.md,.markdown,.txt,.csv,.png,.jpg,.jpeg,.bmp,.webp,.tif,.tiff">
+        <div class="row">
+            <input type="text" id="docTitle" placeholder="文档标题（留空则用文件名）">
+            <button class="btn" id="uploadBtn" disabled>上传并入库</button>
+        </div>
+        <div class="result" id="uploadResult"></div>`;
+
+    const drop = $('drop'), input = $('fileInput'), btn = $('uploadBtn');
+
+    drop.onclick = () => input.click();
+    drop.ondragover = (e) => { e.preventDefault(); drop.classList.add('over'); };
+    drop.ondragleave = () => drop.classList.remove('over');
+    drop.ondrop = (e) => {
+        e.preventDefault(); drop.classList.remove('over');
+        if (e.dataTransfer.files.length) setFile(e.dataTransfer.files[0]);
+    };
+    input.onchange = () => { if (input.files.length) setFile(input.files[0]); };
+
+    function setFile(f) {
+        state.file = f;
+        $('fileName').textContent = f.name + '（' + (f.size / 1024 / 1024).toFixed(2) + ' MB）';
+        btn.disabled = false;
+    }
+
+    btn.onclick = async () => {
+        if (!state.file) return;
+        const box = $('uploadResult');
+        btn.disabled = true;
+        btn.innerHTML = '<span class="spin"></span>解析中…';
+        box.className = 'result show ok';
+        box.textContent = '正在解析并入库，扫描件较多时可能要几十秒，请勿关闭页面…';
+
+        const fd = new FormData();
+        fd.append('file', state.file);
+        const title = $('docTitle').value.trim();
+        if (title) fd.append('title', title);
+
+        try {
+            const r = await api('/api/admin/knowledge/upload', { method: 'POST', body: fd });
+            let html = `<strong>${r.message}</strong><br>`;
+            if (r.chunks != null) {
+                html += `标题：${r.title || '(无)'}　切片：${r.chunks}　表格：${r.tables ?? 0} 张　`
+                     +  `页数：${r.pageCount ?? '-'}　OCR：${r.ocrPages ?? 0} 页`;
+            }
+            if (r.warnings && r.warnings.length) {
+                html += '<ul>' + r.warnings.map(w => `<li>${w}</li>`).join('') + '</ul>';
+            }
+            box.className = 'result show ok';
+            box.innerHTML = html;
+            state.file = null;
+            $('fileName').textContent = '未选择文件';
+            $('fileInput').value = '';
+        } catch (e) {
+            box.className = 'result show err';
+            box.textContent = '上传失败：' + e.message;
+        } finally {
+            btn.disabled = false;
+            btn.textContent = '上传并入库';
+        }
+    };
+}
+
+// ---------------- 文档列表 ----------------
+async function renderDocs(p) {
+    p.innerHTML = '<h2>文档列表</h2><div class="loading">加载中…</div>';
+    try {
+        const rows = await api('/api/admin/knowledge/docs');
+        if (!rows.length) {
+            p.innerHTML = '<h2>文档列表</h2><div class="empty">还没有入库任何文档</div>';
+            return;
+        }
+        p.innerHTML = `
+            <h2>文档列表（${rows.length}）</h2>
+            <table>
+                <thead><tr><th>标题</th><th>来源</th><th>状态</th><th>切片</th><th>入库时间</th><th></th></tr></thead>
+                <tbody>${rows.map(r => `
+                    <tr>
+                        <td>${esc(r.title || '(无标题)')}</td>
+                        <td><span class="tag muted">${esc(r.docType || '')}</span></td>
+                        <td><span class="tag">${esc(r.status || '')}</span></td>
+                        <td>${r.chunkCount ?? 0}</td>
+                        <td>${fmtTime(r.createTime)}</td>
+                        <td><button class="btn danger" data-del="${r.id}" style="padding:4px 10px;font-size:12px">删除</button></td>
+                    </tr>`).join('')}
+                </tbody>
+            </table>
+            <div class="result" id="delResult"></div>`;
+
+        p.querySelectorAll('[data-del]').forEach(b => {
+            b.onclick = async () => {
+                const id = b.dataset.del;
+                if (!confirm('删除后该文档的切片与表格会从索引中清除，聊天页将不再能检索到它。确认删除？')) return;
+                b.disabled = true;
+                const box = $('delResult');
+                try {
+                    const r = await api('/api/admin/knowledge/docs/' + id, { method: 'DELETE' });
+                    box.className = 'result show ok';
+                    box.textContent = r.message || '已删除';
+                    renderDocs(p);
+                } catch (e) {
+                    box.className = 'result show err';
+                    box.textContent = '删除失败：' + e.message;
+                    b.disabled = false;
+                }
+            };
+        });
+    } catch (e) {
+        p.innerHTML = `<h2>文档列表</h2><div class="result show err">加载失败：${e.message}</div>`;
+    }
+}
+
+// ---------------- 飞轮 ----------------
+async function renderFlywheel(p) {
+    p.innerHTML = '<h2>飞轮待审</h2><div class="loading">加载中…</div>';
+    try {
+        const rows = await api('/api/admin/knowledge/flywheel?limit=50');
+        if (!rows.length) {
+            p.innerHTML = '<h2>飞轮待审</h2><div class="empty">没有待审的问题</div>';
+            return;
+        }
+        p.innerHTML = `
+            <h2>飞轮待审（${rows.length}）</h2>
+            <p class="hint">这些是系统答不上来的问题。补一句人工答案通过后，下次就能答上了。</p>
+            ${rows.map(r => `
+                <div style="border:1px solid var(--border);border-radius:8px;padding:12px 14px;margin-bottom:10px">
+                    <div class="q" style="font-weight:500;margin-bottom:4px">${esc(r.question)}</div>
+                    <div style="color:var(--muted);font-size:12px;margin-bottom:8px">
+                        来源：${esc(r.source || '-')}　分数：${r.score != null ? Number(r.score).toFixed(3) : '-'}　${fmtTime(r.createTime)}
+                    </div>
+                    <textarea data-ans="${r.id}" placeholder="填写准确答案（会原样补进知识库）"
+                        style="width:100%;min-height:64px;padding:8px 10px;border:1px solid var(--border);border-radius:8px;font-family:inherit;font-size:13px;outline:none"></textarea>
+                    <div style="margin-top:8px;display:flex;gap:8px">
+                        <button class="btn" data-approve="${r.id}">通过并补进知识库</button>
+                        <button class="btn ghost" data-reject="${r.id}">驳回</button>
+                    </div>
+                </div>`).join('')}
+            <div class="result" id="fwResult"></div>`;
+
+        p.querySelectorAll('[data-approve]').forEach(b => {
+            b.onclick = async () => {
+                const id = b.dataset.approve;
+                const answer = p.querySelector(`[data-ans="${id}"]`).value.trim();
+                if (!answer) { alert('通过前请先填写答案'); return; }
+                b.disabled = true;
+                try {
+                    const r = await api(`/api/admin/knowledge/flywheel/${id}/approve`, {
+                        method: 'POST', body: JSON.stringify({ answer })
+                    });
+                    alert(r.message || '已补进知识库');
+                    renderFlywheel(p);
+                } catch (e) { alert('操作失败：' + e.message); b.disabled = false; }
+            };
+        });
+
+        p.querySelectorAll('[data-reject]').forEach(b => {
+            b.onclick = async () => {
+                const id = b.dataset.reject;
+                b.disabled = true;
+                try {
+                    await api(`/api/admin/knowledge/flywheel/${id}/reject`, {
+                        method: 'POST', body: JSON.stringify({})
+                    });
+                    renderFlywheel(p);
+                } catch (e) { alert('操作失败：' + e.message); b.disabled = false; }
+            };
+        });
+    } catch (e) {
+        p.innerHTML = `<h2>飞轮待审</h2><div class="result show err">加载失败：${e.message}</div>`;
+    }
+}
+
+// ---------------- 工具 ----------------
+function esc(s) {
+    return String(s ?? '').replace(/[&<>"']/g, c =>
+        ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+function fmtTime(t) {
+    if (!t) return '-';
+    return String(t).replace('T', ' ').substring(0, 16);
+}
+$('username').focus();
+</script>
+</body>
+</html>

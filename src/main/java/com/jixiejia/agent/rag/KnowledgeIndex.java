@@ -42,6 +42,7 @@ public class KnowledgeIndex {
     private static final String FIELD_DOC_ID = "docId";
     private static final String FIELD_CHUNK_ID = "chunkId";
     private static final String FIELD_TITLE = "title";
+    private static final String FIELD_TABLE_ID = "tableId";
 
     private static final String ANALYZER_INDEX = "ik_max_word";
     private static final String ANALYZER_SEARCH = "ik_smart";
@@ -76,6 +77,10 @@ public class KnowledgeIndex {
     public void ensureIndex() throws Exception {
         boolean exists = client.indices().exists(e -> e.index(NAME)).value();
         if (exists) {
+            // 索引已存在时不动数据，但**新增字段要补上**：ES 允许给已有 mapping
+            // 追加字段（putMapping 是合并语义，不会重建索引、不丢数据），
+            // 所以升级时缺哪个补哪个即可，不用重建。
+            ensureMappingFields();
             log.info("知识库索引 {} 已存在", NAME);
             return;
         }
@@ -93,9 +98,33 @@ public class KnowledgeIndex {
                 .similarity("cosine"))));
         properties.put(FIELD_DOC_ID, Property.of(p -> p.long_(l -> l)));
         properties.put(FIELD_CHUNK_ID, Property.of(p -> p.long_(l -> l)));
+        properties.put(FIELD_TABLE_ID, Property.of(p -> p.long_(l -> l)));
 
         client.indices().create(c -> c.index(NAME).mappings(m -> m.properties(properties)));
         log.info("知识库索引 {} 已创建（{} 维向量 + IK 中文分词）", NAME, dimensions);
+    }
+
+    /**
+     * 给已存在的索引补上新版才有的字段。
+     *
+     * <p>为什么需要：索引是应用启动时按需创建的，而线上已经有一份索引和数据了。
+     * 直接 putMapping 追加字段是安全的（不会重建、不动已有文档），
+     * 但如果索引压根不存在就会报错——所以只在"已存在"这条分支里调。
+     */
+    private void ensureMappingFields() {
+        try {
+            var mapping = client.indices().getMapping(g -> g.index(NAME)).get(NAME);
+            if (mapping != null && mapping.mappings().properties().containsKey(FIELD_TABLE_ID)) {
+                return;
+            }
+            client.indices().putMapping(p -> p.index(NAME).properties(
+                    FIELD_TABLE_ID, Property.of(prop -> prop.long_(l -> l))));
+            log.info("知识库索引 {} 补充字段 {}", NAME, FIELD_TABLE_ID);
+        } catch (Exception e) {
+            // 补字段失败不该阻断启动：检索时会退化成"表格块按摘要匹配"，
+            // 功能降级但不崩
+            log.warn("补充索引字段失败（不影响启动）：{}", e.toString());
+        }
     }
 
     /** ES 文档 id：文档 id + 块序号，便于按文档整体删除。 */
@@ -122,5 +151,10 @@ public class KnowledgeIndex {
 
     public static String fieldTitle() {
         return FIELD_TITLE;
+    }
+
+    /** 表格 id 字段。带值的切片是表格摘要，命中后要取回完整表。 */
+    public static String fieldTableId() {
+        return FIELD_TABLE_ID;
     }
 }

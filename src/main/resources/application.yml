@@ -44,6 +44,15 @@ spring:
     default-property-inclusion: non_null
     time-zone: Asia/Shanghai
 
+  # 文件上传（管理台知识库）。Spring Boot 默认单文件上限只有 1MB，
+  # 一份带图的国家标准 PDF 就 1~2MB，不放开的话上传直接 413。
+  servlet:
+    multipart:
+      max-file-size: ${UPLOAD_MAX_FILE_MB:50}MB
+      max-request-size: ${UPLOAD_MAX_REQUEST_MB:50}MB
+      # 小于这个大小的文件先写内存，超过才落磁盘临时文件
+      file-size-threshold: 2MB
+
   # 主聊天模型 = MIMO（OpenAI 兼容）
   ai:
     model:
@@ -209,6 +218,27 @@ rag:
   # 生成后自评：答案有没有超出资料。用本地小模型，判不出来时放行
   self-eval:
     enabled: ${RAG_SELF_EVAL_ENABLED:true}
+
+  # 文档解析（管理台上传 PDF/Word/图片）
+  parse:
+    # LiteParse CLI 命令名。Windows 上 npm 全局包装的是 lit.cmd，ProcessBuilder
+    # 找不到时会自动用 cmd /c 兜一层，一般不用改这里。
+    lit-command: ${RAG_LIT_COMMAND:lit}
+    lit-timeout-seconds: ${RAG_LIT_TIMEOUT_SECONDS:180}
+
+    # 扫描页 OCR：走多模态大模型，按量计费
+    ocr:
+      # 文本覆盖率低于这个值就认为"这页没有文本层"，送去 OCR。
+      # 实测：文本完好的 PDF 是 0.25，扫描件是 0.008~0.08。
+      # 注意不要用 LiteParse 的 needsOcr 布尔值来分流——它会被"页面里有图"点亮。
+      coverage-threshold: ${RAG_OCR_COVERAGE_THRESHOLD:0.02}
+      # 单次上传最多 OCR 多少页。多模态按量计费，必须有上限兜住最坏情况
+      max-pages: ${RAG_OCR_MAX_PAGES:50}
+      # 截图 DPI。太高会让图片 token 暴涨
+      dpi: ${RAG_OCR_DPI:200}
+      model: ${RAG_OCR_MODEL:qwen-vl-max}
+      base-url: ${RAG_OCR_BASE_URL:https://dashscope.aliyuncs.com}
+      api-key: ${DASHSCOPE_API_KEY:}
 
 # 观测与成本
 langfuse:

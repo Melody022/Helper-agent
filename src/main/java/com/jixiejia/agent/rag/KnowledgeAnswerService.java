@@ -3,12 +3,18 @@ package com.jixiejia.agent.rag;
 import com.jixiejia.agent.llm.LlmClients;
 import com.jixiejia.agent.llm.ModelCaller;
 import com.jixiejia.agent.llm.PromptLibrary;
+import com.jixiejia.agent.persistence.entity.ai.AiKnowledgeTable;
+import com.jixiejia.agent.persistence.mapper.ai.AiKnowledgeTableMapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
+import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+import java.util.stream.Collectors;
 
 /**
  * 知识问答：检索 → 证据闸 → 生成 → 自评。每一步都可能把这次问答拦下来。
@@ -54,6 +60,7 @@ public class KnowledgeAnswerService {
     private final LlmClients clients;
     private final ModelCaller modelCaller;
     private final PromptLibrary prompts;
+    private final AiKnowledgeTableMapper tableMapper;
 
     @Value("${rag.retrieval.top-k:5}")
     private int topK;
@@ -96,8 +103,9 @@ public class KnowledgeAnswerService {
                     gate.evidenceCount(), gate.reason());
         }
 
-        // ③ 生成
-        String answer = generate(question, hits);
+        // ③ 生成。喂给模型之前先把命中的表格摘要换成完整表格——
+        // 摘要只够"让检索命中"，拿它回答等于只给模型看表头和前几行，数据一定是错的。
+        String answer = generate(question, expandTables(hits));
         if (answer == null || answer.isBlank()) {
             flywheelService.record(FlywheelService.SOURCE_WEAK_EVIDENCE,
                     conversationId, question, null, gate.topScore());
@@ -128,6 +136,48 @@ public class KnowledgeAnswerService {
             return "null";
         }
         return s.length() <= 60 ? s : s.substring(0, 60) + "…";
+    }
+
+    /**
+     * 把命中结果里"表格摘要"换成完整表格。
+     *
+     * <p>这是"方案 A"闭环的最后一环：入库时表格本体另存、只向量化摘要；
+     * 检索命中的是摘要；<b>喂给模型前必须换回完整表</b>，否则模型看到的是残缺行列。
+     *
+     * <p>放在这里而不是检索器里，是因为证据闸要用<b>短摘要</b>判相关性——
+     * 拿整张几百行的表去精排既慢又偏。所以顺序是：
+     * 检索（摘要）→ 证据闸（判摘要）→ 回填完整表 → 生成。
+     *
+     * <p>查不到表格时保留摘要原文、不抛异常：宁可让模型凑合答，
+     * 也别因为一条表格记录缺失就把整问答挂掉。
+     */
+    private List<KnowledgeRetriever.Hit> expandTables(List<KnowledgeRetriever.Hit> hits) {
+        if (hits.stream().noneMatch(h -> h.tableId() != null)) {
+            return hits;
+        }
+
+        List<Long> ids = hits.stream()
+                .map(KnowledgeRetriever.Hit::tableId)
+                .filter(Objects::nonNull)
+                .distinct()
+                .toList();
+
+        Map<Long, String> markdownById = tableMapper.selectBatchIds(ids).stream()
+                .filter(t -> t.getMarkdown() != null)
+                .collect(Collectors.toMap(AiKnowledgeTable::getId, AiKnowledgeTable::getMarkdown));
+
+        List<KnowledgeRetriever.Hit> expanded = new ArrayList<>(hits.size());
+        for (KnowledgeRetriever.Hit h : hits) {
+            String full = h.tableId() == null ? null : markdownById.get(h.tableId());
+            if (full == null) {
+                expanded.add(h);
+                continue;
+            }
+            expanded.add(new KnowledgeRetriever.Hit(h.vectorId(), h.docId(), h.chunkId(),
+                    h.title(), full, h.rrfScore(), h.vectorScore(), h.bm25Score(),
+                    h.bm25Rank(), h.knnRank(), h.tableId()));
+        }
+        return expanded;
     }
 
     /** 把资料拼进提示词生成回答。 */
