@@ -45,6 +45,23 @@ public class AiKnowledgeDoc {
 
     private String errorMsg;
 
+    /** 上传时的原始文件名，如 "GBT+25523-2022.pdf"；非上传来源（文章/飞轮）为 null */
+    private String fileName;
+
+    /** 原件落盘的相对路径（相对 rag.upload.dir）；非上传来源为 null */
+    private String filePath;
+
+    /**
+     * PDF 预览件的相对路径。
+     *
+     * <p><b>只有 Office 文档才有。</b>PDF / 图片 / txt 的原件浏览器本来就能直接显示，
+     * 不需要另存一份；只有 docx/xlsx/pptx 浏览器渲染不了（只会触发下载），才转一份 PDF。
+     */
+    private String previewPath;
+
+    /** 原件字节数 */
+    private Long fileSize;
+
     @TableLogic(value = "0", delval = "2")
     private String delFlag;
 
