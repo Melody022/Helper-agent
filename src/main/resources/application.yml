@@ -237,6 +237,9 @@ rag:
   # 这个目录不进 git（体积不可控）。
   upload:
     dir: ${RAG_UPLOAD_DIR:data/knowledge-files}
+    # 转 PDF 用的命令。做成可配置是为了能在测试里注入一个必然失败的命令，
+    # 从而验证"转换失败返回 null 不抛异常"这条核心契约。
+    soffice: ${RAG_UPLOAD_SOFFICE:soffice}
 
   # 文档解析（管理台上传 PDF/Word/图片）
   parse:

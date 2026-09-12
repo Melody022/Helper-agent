@@ -73,4 +73,36 @@ class KnowledgeFileStoreTest {
         assertThat(path).exists();
         assertThat(Files.readString(path)).isEqualTo("这是一份测试原件");
     }
+
+    @Test
+    @DisplayName("扩展名里带路径分隔符时按'没有扩展名'处理，绝不爬出落盘目录")
+    void storeIgnoresPathTraversalInExtension(@TempDir Path dir) throws Exception {
+        KnowledgeFileStore store = new KnowledgeFileStore(dir.toString());
+
+        // DocumentParser.extensionOf("a.xyz/../../foo") 返回的就是 "xyz/../../foo"
+        String name = store.store("upload-safe", "xyz/../../evil", CONTENT);
+
+        assertThat(name).isEqualTo("upload-safe");
+        assertThat(store.resolve(name)).exists();
+        // 上一层目录里绝不能多出东西
+        assertThat(dir.getParent().resolve("evil")).doesNotExist();
+    }
+
+    @Test
+    @DisplayName("转换命令不存在时返回 null，不抛异常——预览失败不能拖垮入库")
+    void convertFailsQuietlyWhenCommandMissing(@TempDir Path dir) throws Exception {
+        KnowledgeFileStore store = new KnowledgeFileStore(dir.toString(), "no-such-command-xyz-123");
+        String stored = store.store("upload-doc", "docx", CONTENT);
+
+        assertThat(store.convertOfficeToPdf("upload-doc", stored)).isNull();
+    }
+
+    @Test
+    @DisplayName("相对路径越界是非法输入，会抛 IllegalArgumentException（和'操作失败'区别对待）")
+    void convertRejectsTraversalPath(@TempDir Path dir) {
+        KnowledgeFileStore store = new KnowledgeFileStore(dir.toString());
+
+        assertThatThrownBy(() -> store.convertOfficeToPdf("upload-x", "../../etc/passwd"))
+                .isInstanceOf(IllegalArgumentException.class);
+    }
 }
