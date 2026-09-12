@@ -11,6 +11,10 @@
 --   只有 docx/xlsx/pptx 浏览器渲染不了（只会触发下载），才转一份 PDF。
 --
 -- 幂等：用 information_schema 守卫，可重复执行。
+--
+-- ⚠️ 但"可重复执行"不等于"改了这个文件就能生效"：守卫的判据是**列不存在才加**，
+--    所以**改列定义（包括注释、长度）不会作用到已经加过列的库**——重跑只会走 `DO 0` 那条空分支。
+--    真要改已有的列，得另写一条 MODIFY COLUMN，而不是改这里。
 -- =============================================================================
 
 SET @c1 := (SELECT COUNT(*) FROM information_schema.COLUMNS
@@ -38,7 +42,7 @@ SET @c3 := (SELECT COUNT(*) FROM information_schema.COLUMNS
 SET @ddl3 := IF(@c3 = 0,
   'ALTER TABLE `ai_knowledge_doc`
      ADD COLUMN `preview_path` varchar(500) DEFAULT NULL
-       COMMENT ''PDF 预览件相对路径；仅 Office 文档有，其余原样返回原件''',
+       COMMENT ''PDF 预览件相对路径；仅 Office 文档有，其余为 NULL''',
   'DO 0');
 PREPARE s3 FROM @ddl3; EXECUTE s3; DEALLOCATE PREPARE s3;
 
