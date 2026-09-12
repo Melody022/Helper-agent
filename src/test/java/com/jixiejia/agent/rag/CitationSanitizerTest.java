@@ -22,6 +22,13 @@ class CitationSanitizerTest {
     }
 
     @Test
+    @DisplayName("全角数字也要归一，且转成半角——照抄全角的话前端照样认不出")
+    void normalizesFullWidthDigits() {
+        assertThat(CitationSanitizer.normalize("押金 7 天退【１】")).isEqualTo("押金 7 天退[1]");
+        assertThat(CitationSanitizer.normalize("费率 <２>")).isEqualTo("费率 [2]");
+    }
+
+    @Test
     @DisplayName("资料在提示词里是 <1> 形态，模型照抄回来也要认")
     void normalizesAngleBrackets() {
         assertThat(CitationSanitizer.normalize("费率 3% <3>")).isEqualTo("费率 3% [3]");
@@ -31,6 +38,13 @@ class CitationSanitizerTest {
     @DisplayName("括号里有空格也要认")
     void toleratesInnerSpaces() {
         assertThat(CitationSanitizer.normalize("服务费【 1 】")).isEqualTo("服务费[1]");
+    }
+
+    @Test
+    @DisplayName("半角方括号夹空格也要收敛，且要幂等")
+    void normalizesHalfWidthSpacing() {
+        assertThat(CitationSanitizer.normalize("服务费 [ 1 ]")).isEqualTo("服务费 [1]");
+        assertThat(CitationSanitizer.normalize("已经是半角了 [1]")).isEqualTo("已经是半角了 [1]");
     }
 
     @Test
