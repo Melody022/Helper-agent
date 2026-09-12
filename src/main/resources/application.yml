@@ -232,6 +232,12 @@ rag:
   self-eval:
     enabled: ${RAG_SELF_EVAL_ENABLED:true}
 
+  # 上传原件的落盘目录（相对工作目录）。
+  # 文件名用内容指纹，所以同一份文件重复上传不会堆第二份。
+  # 这个目录不进 git（体积不可控）。
+  upload:
+    dir: ${RAG_UPLOAD_DIR:data/knowledge-files}
+
   # 文档解析（管理台上传 PDF/Word/图片）
   parse:
     # LiteParse CLI 命令名。Windows 上 npm 全局包装的是 lit.cmd，ProcessBuilder
