@@ -276,17 +276,53 @@ class M4RouterTest {
     }
 
     @Test
-    @DisplayName("粘性：短的半截追问仍然走粘性（修完上面的洞不能把这条路也堵了）")
-    void shortFollowUpStillUsesSticky() {
+    @DisplayName("粘性：**正好卡在字数阈值上**的完整问题也不能被吃掉")
+    void shortButCompleteQuestionIsNotSwallowedBySticky() {
+        String conversationId = newConversationId();
+
+        // 用户实测报回来的场景：上一轮聊过租赁，接着问驾驶室要求，
+        // 被粘在了 RentalAgent 上。根因是当时还有一条"字数 ≤ 12 就算追问"的判据，
+        // 而这句话**正好 12 个字**——中文一句话信息密度高，12 个字已经是一句完整的问题。
+        msgRouter.route(request(conversationId, "有没有二手的挖掘机出租"));
+
+        RoutingDecision next = msgRouter.route(request(conversationId,
+                "挖掘机驾驶室有什么要求吗"));
+
+        assertThat(next.stage())
+                .as("字数不该成为判据——它是在猜，中文里完整问题也可以很短")
+                .isNotEqualTo(RouteStage.STICKY);
+    }
+
+    @Test
+    @DisplayName("粘性：含指代词的追问仍然走粘性，不叫模型")
+    void anaphoricFollowUpStillUsesSticky() {
         String conversationId = newConversationId();
 
         msgRouter.route(request(conversationId, "有没有二手的挖掘机"));
 
-        // "多少钱" 三个字、不含指代词，但足够短——半截追问的典型形态
-        RoutingDecision followUp = msgRouter.route(request(conversationId, "多少钱"));
+        // "那这个呢"含指代词——脱离上文根本理解不了，几乎必然是追问
+        RoutingDecision followUp = msgRouter.route(request(conversationId, "那这个呢"));
 
         assertThat(followUp.stage()).isEqualTo(RouteStage.STICKY);
         assertThat(followUp.agentKey()).isEqualTo("EquipmentAgent");
+        assertThat(followUp.classifyLayer()).as("这条路径不叫模型").isNull();
+    }
+
+    @Test
+    @DisplayName("粘性：不含指代词的短句不再靠粘性兜底（「短」不是判据）")
+    void shortNonAnaphoricQuestionDoesNotUseSticky() {
+        String conversationId = newConversationId();
+
+        msgRouter.route(request(conversationId, "有没有二手的挖掘机"));
+
+        // "多少钱"只有三个字，但字面意思已经完整——它不指代任何东西。
+        // 曾经它因为"够短"被粘性兜住；现在交给第 ④⑤ 步连同上文一起判，
+        // 代价是多跑一次本地小模型（免费），换来的是**路由可预测**。
+        RoutingDecision followUp = msgRouter.route(request(conversationId, "多少钱"));
+
+        assertThat(followUp.stage())
+                .as("判据只剩「含指代词」一条，短不再是理由")
+                .isNotEqualTo(RouteStage.STICKY);
     }
 
     @Test
@@ -409,7 +445,9 @@ class M4RouterTest {
         assertThat(referenceResolver.needsResolution("那台还在吗")).isTrue();
         assertThat(referenceResolver.needsResolution("它多少钱")).isTrue();
 
-        // 这些是追问，字面意思已完整，该由粘性兜住而不是每轮白跑一次模型
+        // 这些**不含**指代词，字面意思已完整——它们不再由粘性兜底，
+        // 而是走第 ④⑤ 步连同上文一起判（多一次本地小模型，免费）。
+        // 曾经它们靠"够短"进粘性快路径，那条判据已经被删掉了。
         assertThat(referenceResolver.needsResolution("还有吗")).isFalse();
         assertThat(referenceResolver.needsResolution("有没有便宜点的")).isFalse();
         assertThat(referenceResolver.needsResolution("换一个看看")).isFalse();
