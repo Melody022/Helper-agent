@@ -43,6 +43,8 @@ public class KnowledgeIndex {
     private static final String FIELD_CHUNK_ID = "chunkId";
     private static final String FIELD_TITLE = "title";
     private static final String FIELD_TABLE_ID = "tableId";
+    private static final String FIELD_SECTION_PATH = "sectionPath";
+    private static final String FIELD_PAGE_NO = "pageNo";
 
     private static final String ANALYZER_INDEX = "ik_max_word";
     private static final String ANALYZER_SEARCH = "ik_smart";
@@ -99,6 +101,8 @@ public class KnowledgeIndex {
         properties.put(FIELD_DOC_ID, Property.of(p -> p.long_(l -> l)));
         properties.put(FIELD_CHUNK_ID, Property.of(p -> p.long_(l -> l)));
         properties.put(FIELD_TABLE_ID, Property.of(p -> p.long_(l -> l)));
+        properties.put(FIELD_SECTION_PATH, Property.of(p -> p.keyword(k -> k.ignoreAbove(512))));
+        properties.put(FIELD_PAGE_NO, Property.of(p -> p.integer(i -> i)));
 
         client.indices().create(c -> c.index(NAME).mappings(m -> m.properties(properties)));
         log.info("知识库索引 {} 已创建（{} 维向量 + IK 中文分词）", NAME, dimensions);
@@ -110,18 +114,35 @@ public class KnowledgeIndex {
      * <p>为什么需要：索引是应用启动时按需创建的，而线上已经有一份索引和数据了。
      * 直接 putMapping 追加字段是安全的（不会重建、不动已有文档），
      * 但如果索引压根不存在就会报错——所以只在"已存在"这条分支里调。
+     *
+     * <p>实现成"缺哪个补哪个"：以后再加字段，只要在这里加一行判断就行，
+     * 不用每次都想一遍升级路径。
      */
     private void ensureMappingFields() {
         try {
             var mapping = client.indices().getMapping(g -> g.index(NAME)).get(NAME);
-            if (mapping != null && mapping.mappings().properties().containsKey(FIELD_TABLE_ID)) {
+            Map<String, Property> existing =
+                    mapping == null ? Map.of() : mapping.mappings().properties();
+
+            Map<String, Property> toAdd = new LinkedHashMap<>();
+            if (!existing.containsKey(FIELD_TABLE_ID)) {
+                toAdd.put(FIELD_TABLE_ID, Property.of(p -> p.long_(l -> l)));
+            }
+            if (!existing.containsKey(FIELD_SECTION_PATH)) {
+                toAdd.put(FIELD_SECTION_PATH, Property.of(p -> p.keyword(k -> k.ignoreAbove(512))));
+            }
+            if (!existing.containsKey(FIELD_PAGE_NO)) {
+                toAdd.put(FIELD_PAGE_NO, Property.of(p -> p.integer(i -> i)));
+            }
+            if (toAdd.isEmpty()) {
                 return;
             }
-            client.indices().putMapping(p -> p.index(NAME).properties(
-                    FIELD_TABLE_ID, Property.of(prop -> prop.long_(l -> l))));
-            log.info("知识库索引 {} 补充字段 {}", NAME, FIELD_TABLE_ID);
+
+            client.indices().putMapping(p -> p.index(NAME).properties(toAdd));
+            log.info("知识库索引 {} 补充字段 {}", NAME, toAdd.keySet());
+
         } catch (Exception e) {
-            // 补字段失败不该阻断启动：检索时会退化成"表格块按摘要匹配"，
+            // 补字段失败不该阻断启动：检索时会退化成"没有这些元数据"，
             // 功能降级但不崩
             log.warn("补充索引字段失败（不影响启动）：{}", e.toString());
         }
@@ -156,5 +177,15 @@ public class KnowledgeIndex {
     /** 表格 id 字段。带值的切片是表格摘要，命中后要取回完整表。 */
     public static String fieldTableId() {
         return FIELD_TABLE_ID;
+    }
+
+    /** 章节路径字段。用于溯源展示与"同章节回填"。 */
+    public static String fieldSectionPath() {
+        return FIELD_SECTION_PATH;
+    }
+
+    /** 页码字段。用于溯源展示。 */
+    public static String fieldPageNo() {
+        return FIELD_PAGE_NO;
     }
 }

@@ -3,7 +3,10 @@ package com.jixiejia.agent.rag;
 import com.jixiejia.agent.llm.LlmClients;
 import com.jixiejia.agent.llm.ModelCaller;
 import com.jixiejia.agent.llm.PromptLibrary;
+import com.baomidou.mybatisplus.core.toolkit.Wrappers;
+import com.jixiejia.agent.persistence.entity.ai.AiKnowledgeChunk;
 import com.jixiejia.agent.persistence.entity.ai.AiKnowledgeTable;
+import com.jixiejia.agent.persistence.mapper.ai.AiKnowledgeChunkMapper;
 import com.jixiejia.agent.persistence.mapper.ai.AiKnowledgeTableMapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -61,6 +64,7 @@ public class KnowledgeAnswerService {
     private final ModelCaller modelCaller;
     private final PromptLibrary prompts;
     private final AiKnowledgeTableMapper tableMapper;
+    private final AiKnowledgeChunkMapper chunkMapper;
 
     @Value("${rag.retrieval.top-k:5}")
     private int topK;
@@ -81,6 +85,15 @@ public class KnowledgeAnswerService {
     @Value("${rag.self-eval.enabled:true}")
     private boolean selfEvalEnabled;
 
+    /**
+     * 同章节回填开关。
+     *
+     * <p>开启后，命中块所在章节的前后邻块也会一起喂给模型——解决"条款被切成几块、
+     * 模型只看到半截"的问题。关掉可做对照，看它对回答质量的实际影响。
+     */
+    @Value("${rag.retrieval.sibling-expand:true}")
+    private boolean siblingExpandEnabled;
+
     /** 生成回答的超时。比分类宽松得多：要读完资料再写一整段 */
     @Value("${rag.answer.generation-timeout-ms:60000}")
     private long generationTimeoutMs;
@@ -89,9 +102,42 @@ public class KnowledgeAnswerService {
     @Value("${rag.self-eval.timeout-ms:30000}")
     private long selfEvalTimeoutMs;
 
+    /**
+     * 一条答案依据。给前端做溯源展示用。
+     *
+     * @param title       文档标题
+     * @param sectionPath 章节路径，如 {@code "5 安全要求 > 5.4 润滑系统"}；没有时为 null
+     * @param pageNo      页码（1 起）；没有时为 null
+     * @param snippet     正文片段（截断过），供前端展示"依据原文"
+     */
+    public record Source(String title, String sectionPath, Integer pageNo, String snippet) {
+    }
+
     /** 单次知识问答的结果。 */
     public record Answer(boolean answered, String text, double topScore,
-                         int evidenceCount, String note) {
+                         int evidenceCount, String note, List<Source> sources) {
+
+        /** 没有依据可展示时的便捷构造（拒答、闲聊等）。 */
+        public Answer(boolean answered, String text, double topScore, int evidenceCount, String note) {
+            this(answered, text, topScore, evidenceCount, note, List.of());
+        }
+    }
+
+    /**
+     * 把喂给模型的资料整理成溯源列表。
+     *
+     * <p>顺序就是喂给模型的顺序——前端按序号展示时，和答案里可能出现的引用能对上。
+     */
+    private static List<Source> toSources(List<KnowledgeRetriever.Hit> hits) {
+        List<Source> sources = new ArrayList<>(hits.size());
+        for (KnowledgeRetriever.Hit h : hits) {
+            String content = h.content() == null ? "" : h.content().replace("\n", " ");
+            sources.add(new Source(h.title(),
+                    h.sectionPath(),
+                    h.pageNo(),
+                    content.length() <= 160 ? content : content.substring(0, 160) + "…"));
+        }
+        return sources;
     }
 
     /**
@@ -120,9 +166,10 @@ public class KnowledgeAnswerService {
         // ③ 只把精排选出来的前几条喂给模型，避免无关资料干扰
         List<KnowledgeRetriever.Hit> evidence = gate.evidence().stream().limit(topK).toList();
 
-        // ④ 生成。喂给模型之前先把命中的表格摘要换成完整表格——
-        // 摘要只够"让检索命中"，拿它回答等于只给模型看表头和前几行，数据一定是错的。
-        List<KnowledgeRetriever.Hit> expanded = expandTables(evidence);
+        // ④ 回填「本体」：表格摘要换回完整表格、命中块补上同章节的邻块。
+        //    这两件事是同一个模式——检索命中的是"入口"，喂给模型前要把"本体"补全。
+        List<KnowledgeRetriever.Hit> expanded = expandTables(expandSiblings(evidence));
+
         String answer = generate(question, expanded);
         if (answer == null || answer.isBlank()) {
             flywheelService.record(FlywheelService.SOURCE_WEAK_EVIDENCE,
@@ -147,7 +194,8 @@ public class KnowledgeAnswerService {
             }
         }
 
-        return new Answer(true, answer, gate.topScore(), gate.evidenceCount(), gate.reason());
+        return new Answer(true, answer, gate.topScore(), gate.evidenceCount(), gate.reason(),
+                toSources(expanded));
     }
 
     private static String abbreviate(String s) {
@@ -155,6 +203,80 @@ public class KnowledgeAnswerService {
             return "null";
         }
         return s.length() <= 60 ? s : s.substring(0, 60) + "…";
+    }
+
+    /**
+     * 同章节回填：把命中块**所在章节**的相邻块也带回来。
+     *
+     * <p><b>解决什么问题。</b>切片是按 400 字切的，一个条款的完整意思常常跨好几块。
+     * 只把命中的那一块喂给模型，它会看到"半截规定"——比如只看到"5.4.4.1 润滑系统应安全可靠"，
+     * 却看不到紧接着的"5.4.4.2 减速机应…"和"5.4.4.3 报警装置应…"，答出来的东西是残缺的。
+     *
+     * <p><b>为什么按章节回填，而不是简单地取前后各一块</b>：纯按物理位置取，
+     * 上一块可能是**另一个章节**的内容，带进来是噪声。按 {@code section_path} 限定范围，
+     * 补回来的才一定和命中内容同属一节。
+     *
+     * <p>这就是"父子块（small-to-big）"的轻量形态——不做严格的父块存储，
+     * 而是用章节路径这个天然的归属关系把兄弟块聚起来。
+     */
+    private List<KnowledgeRetriever.Hit> expandSiblings(List<KnowledgeRetriever.Hit> hits) {
+        if (!siblingExpandEnabled) {
+            return hits;
+        }
+
+        // 同一个 (文档, 章节) 可能命中多条，查一次就够
+        Map<String, List<AiKnowledgeChunk>> cache =
+                new java.util.HashMap<>();
+        List<KnowledgeRetriever.Hit> out = new ArrayList<>(hits.size());
+
+        for (KnowledgeRetriever.Hit h : hits) {
+            String section = h.sectionPath();
+            if (section == null || section.isBlank() || h.docId() == null || h.chunkId() == null) {
+                out.add(h);   // 没有结构信息（FAQ、表格摘要）就原样返回
+                continue;
+            }
+
+            String key = h.docId() + "|" + section;
+            List<AiKnowledgeChunk> siblings =
+                    cache.computeIfAbsent(key, k -> chunkMapper.selectList(
+                            Wrappers.<AiKnowledgeChunk>lambdaQuery()
+                                    .eq(AiKnowledgeChunk::getDocId, h.docId())
+                                    .eq(AiKnowledgeChunk::getSectionPath, section)
+                                    .orderByAsc(AiKnowledgeChunk::getChunkIndex)));
+
+            String merged = mergeWithNeighbours(siblings, h.chunkId());
+            out.add(merged.equals(h.content()) ? h
+                    : new KnowledgeRetriever.Hit(h.vectorId(), h.docId(), h.chunkId(), h.title(),
+                            merged, h.rrfScore(), h.vectorScore(), h.bm25Score(),
+                            h.bm25Rank(), h.knnRank(), h.tableId(), h.sectionPath(), h.pageNo()));
+        }
+        return out;
+    }
+
+    /** 取命中块与它的前后邻块拼起来；找不到命中块时原样返回。 */
+    private static String mergeWithNeighbours(
+            List<AiKnowledgeChunk> siblings, Long chunkId) {
+        int at = -1;
+        for (int i = 0; i < siblings.size(); i++) {
+            if (chunkId.equals(siblings.get(i).getId())) {
+                at = i;
+                break;
+            }
+        }
+        if (at < 0) {
+            return "";
+        }
+
+        int from = Math.max(0, at - 1);
+        int to = Math.min(siblings.size() - 1, at + 1);
+        StringBuilder sb = new StringBuilder();
+        for (int i = from; i <= to; i++) {
+            String text = siblings.get(i).getContent();
+            if (text != null && !text.isBlank()) {
+                sb.append(text).append('\n');
+            }
+        }
+        return sb.toString().trim();
     }
 
     /**
@@ -192,9 +314,11 @@ public class KnowledgeAnswerService {
                 expanded.add(h);
                 continue;
             }
+            // 注意要带上 sectionPath/pageNo：这里换个构造参数就会把它们丢成 null，
+            // 表现是"表格题的回答在溯源列表里没有出处"——很难往这个方向想。
             expanded.add(new KnowledgeRetriever.Hit(h.vectorId(), h.docId(), h.chunkId(),
                     h.title(), full, h.rrfScore(), h.vectorScore(), h.bm25Score(),
-                    h.bm25Rank(), h.knnRank(), h.tableId()));
+                    h.bm25Rank(), h.knnRank(), h.tableId(), h.sectionPath(), h.pageNo()));
         }
         return expanded;
     }

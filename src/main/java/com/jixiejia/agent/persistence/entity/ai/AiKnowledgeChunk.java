@@ -50,5 +50,16 @@ public class AiKnowledgeChunk {
      */
     private Long tableId;
 
+    /**
+     * 章节路径，如 {@code "5 安全要求 > 5.4 润滑系统"}。
+     *
+     * <p>两个用途：<b>溯源</b>（告诉用户"依据来自哪一节"）、
+     * <b>上下文回填</b>（命中后把同章节的相邻块取回来，答案跨段时看不全的问题靠它解决）。
+     */
+    private String sectionPath;
+
+    /** 所在页（1 起）。用于答案溯源："依据：第 10 页"。 */
+    private Integer pageNo;
+
     private LocalDateTime createTime;
 }

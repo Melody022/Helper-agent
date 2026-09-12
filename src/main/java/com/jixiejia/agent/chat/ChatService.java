@@ -63,10 +63,18 @@ public class ChatService {
      * @param agentKey       实际处理的 Agent，短路时为 null
      * @param stage          路由终止于哪一步
      * @param shortCircuit   是否为短路回复（转人工/投诉/系统命令）
+     * @param sources        答案依据（仅知识线有），供前端溯源展示；其它线路为空
      */
     public record ChatResult(String conversationId, String answer, String intent,
                              double confidence, String agentKey, String stage,
-                             boolean shortCircuit) {
+                             boolean shortCircuit,
+                             List<KnowledgeAnswerService.Source> sources) {
+
+        /** 没有依据可展示时的便捷构造。 */
+        public ChatResult(String conversationId, String answer, String intent,
+                          double confidence, String agentKey, String stage, boolean shortCircuit) {
+            this(conversationId, answer, intent, confidence, agentKey, stage, shortCircuit, List.of());
+        }
     }
 
     /** 执行一轮对话。调用方需保证 userId 已登录（鉴权由拦截器负责）。 */
@@ -125,6 +133,7 @@ public class ChatService {
 
         String answer;
         String executedAgentKey;
+        List<KnowledgeAnswerService.Source> sources = List.of();
         if (decision.intent() == Intent.KNOWLEDGE_QUERY) {
             // 平台规则单独一条路，不经过 ReAct Agent。
             // 因为这条道的硬要求是"资料不足就不许答"，而 Agent 里的模型有自主权，
@@ -133,6 +142,7 @@ public class ChatService {
                     knowledgeAnswerService.answer(decision.resolvedText(), convId);
             answer = knowledge.text();
             executedAgentKey = "Knowledge(检索+证据闸)";
+            sources = knowledge.sources();
             if (!knowledge.answered()) {
                 // 没答上来意味着这是个知识盲区，记进飞轮等人工补
                 log.debug("知识线未作答：{}", knowledge.note());
@@ -169,7 +179,7 @@ public class ChatService {
 
         return new ChatResult(convId, answer,
                 decision.intent() == null ? null : decision.intent().name(),
-                decision.confidence(), executedAgentKey, decision.stage().code(), false);
+                decision.confidence(), executedAgentKey, decision.stage().code(), false, sources);
     }
 
     /** 跨域：交给综合子图并行跑各域再汇总。 */

@@ -152,6 +152,30 @@
             color: var(--muted);
         }
 
+        /* 答案溯源：默认折叠，点开看依据来自哪份文档的哪一节、第几页 */
+        .sources {
+            margin-top: 8px;
+            font-size: 12px;
+            color: var(--muted);
+        }
+        .sources summary {
+            cursor: pointer;
+            color: #a35a05;
+            user-select: none;
+            display: inline-block;
+        }
+        .sources summary:hover { text-decoration: underline; }
+        .source {
+            margin-top: 8px;
+            padding: 8px 10px;
+            border-left: 3px solid var(--brand-soft);
+            background: #fafbfc;
+            border-radius: 0 6px 6px 0;
+        }
+        .source-head { color: var(--text); font-weight: 500; margin-bottom: 2px; }
+        .source-where { color: #a35a05; margin-bottom: 4px; }
+        .source-snippet { color: var(--muted); line-height: 1.5; }
+
         .tag {
             display: inline-block;
             padding: 1px 7px;
@@ -393,11 +417,37 @@
             if (meta.stage) html += '<span class="tag">' + meta.stage + '</span>';
             m.innerHTML = html;
             wrap.appendChild(m);
+
+            // 溯源：把答案依据列出来。默认折叠，点开能看到"这条答案是从哪份文档
+            // 的哪一节、第几页来的"——客服场景里这是建立信任的关键。
+            if (meta.sources && meta.sources.length) {
+                const box = document.createElement('details');
+                box.className = 'sources';
+                let html2 = '<summary>依据（' + meta.sources.length + '）</summary>';
+                meta.sources.forEach(function (s, i) {
+                    const where = [s.sectionPath, s.pageNo ? ('第 ' + s.pageNo + ' 页') : null]
+                        .filter(Boolean).join(' · ');
+                    html2 += '<div class="source">'
+                        + '<div class="source-head">[' + (i + 1) + '] ' + esc(s.title || '(无标题)') + '</div>'
+                        + (where ? '<div class="source-where">' + esc(where) + '</div>' : '')
+                        + '<div class="source-snippet">' + esc(s.snippet || '') + '</div>'
+                        + '</div>';
+                });
+                box.innerHTML = html2;
+                wrap.appendChild(box);
+            }
         }
 
         row.appendChild(wrap);
         $('messages').appendChild(row);
         scrollDown();
+    }
+
+    /** 转义，避免资料里的尖括号把页面结构撑坏。 */
+    function esc(s) {
+        return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
+            return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+        });
     }
 
     function addTyping() {

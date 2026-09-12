@@ -1,5 +1,6 @@
 package com.jixiejia.agent.rag;
 
+import com.jixiejia.agent.rag.parse.DocBlock;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
@@ -42,15 +43,46 @@ public class TextChunker {
     /**
      * 一个切好的块。
      *
-     * @param tableId 非空表示这是某张表的<b>摘要块</b>；检索命中它之后要按这个 id
-     *                去 {@code ai_knowledge_table} 取回完整表格，不能只把摘要喂给模型
+     * @param tableId     非空表示这是某张表的<b>摘要块</b>；检索命中它之后要按这个 id
+     *                    去 {@code ai_knowledge_table} 取回完整表格，不能只把摘要喂给模型
+     * @param sectionPath 章节路径，如 {@code "5 安全要求 > 5.4 润滑系统"}；溯源与同章节回填用
+     * @param pageNo      所在页（1 起）；溯源展示用
      */
-    public record Chunk(int index, String content, String hash, Long tableId) {
+    public record Chunk(int index, String content, String hash, Long tableId,
+                        String sectionPath, Integer pageNo) {
 
-        /** 普通正文块，不关联表格。 */
+        /** 普通正文块，不关联表格、不带结构信息（FAQ 这类短文本用）。 */
         public Chunk(int index, String content, String hash) {
-            this(index, content, hash, null);
+            this(index, content, hash, null, null, null);
         }
+
+        /** 表格摘要块：带 tableId，但没有章节/页码。 */
+        public Chunk(int index, String content, String hash, Long tableId) {
+            this(index, content, hash, tableId, null, null);
+        }
+    }
+
+    /**
+     * 按带结构信息的段切块，每块继承它所属段的章节路径与页码。
+     *
+     * <p><b>为什么逐段切而不是先把所有段拼起来再切</b>：拼接会重新丢掉段落边界，
+     * 页码和章节归属就传不到块上——那正是我们要解决的问题。
+     * 代价是段落之间没有重叠（现在只保证段内相邻块重叠），
+     * 对"按页 × 章节"拆出来的段来说可以接受：段边界本身就是天然的语义边界。
+     */
+    public List<Chunk> chunk(List<DocBlock> blocks) {
+        List<Chunk> all = new ArrayList<>();
+        if (blocks == null || blocks.isEmpty()) {
+            return all;
+        }
+        int index = 0;
+        for (DocBlock block : blocks) {
+            for (Chunk c : chunk(block.text())) {
+                all.add(new Chunk(index++, c.content(), c.hash(), null,
+                        block.sectionPath(), block.pageNo()));
+            }
+        }
+        return all;
     }
 
     /** 把正文切成若干块。空白或无有效内容时返回空列表。 */

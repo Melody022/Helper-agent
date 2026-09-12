@@ -58,17 +58,29 @@ public class KnowledgeRetriever {
      * @param bm25Score   关键词得分，无上界，仅供排查
      * @param tableId     非空表示这条是某张表的<b>摘要</b>；生成前必须按这个 id 取回完整表格，
      *                    否则模型只看到表头和前几行，答出来的数据是错的
+     * @param sectionPath 章节路径。用于<b>同章节回填</b>（把命中块所在章节的相邻块也取回来，
+     *                    解决"答案跨段看不全"）和答案溯源
+     * @param pageNo      所在页（1 起）。用于答案溯源
      */
     public record Hit(String vectorId, Long docId, Long chunkId, String title, String content,
                       double rrfScore, double vectorScore, double bm25Score,
-                      int bm25Rank, int knnRank, Long tableId) {
+                      int bm25Rank, int knnRank, Long tableId,
+                      String sectionPath, Integer pageNo) {
 
-        /** 不带表格信息的便捷构造：普通正文块。 */
+        /** 不带表格与结构信息的便捷构造。 */
         public Hit(String vectorId, Long docId, Long chunkId, String title, String content,
                    double rrfScore, double vectorScore, double bm25Score,
                    int bm25Rank, int knnRank) {
             this(vectorId, docId, chunkId, title, content, rrfScore, vectorScore, bm25Score,
-                    bm25Rank, knnRank, null);
+                    bm25Rank, knnRank, null, null, null);
+        }
+
+        /** 带表格 id、但不带结构信息的构造。 */
+        public Hit(String vectorId, Long docId, Long chunkId, String title, String content,
+                   double rrfScore, double vectorScore, double bm25Score,
+                   int bm25Rank, int knnRank, Long tableId) {
+            this(vectorId, docId, chunkId, title, content, rrfScore, vectorScore, bm25Score,
+                    bm25Rank, knnRank, tableId, null, null);
         }
     }
 
@@ -122,7 +134,9 @@ public class KnowledgeRetriever {
                     stringOf(source.get(KnowledgeIndex.fieldText())),
                     0, 0, hit.score() == null ? 0 : hit.score(),
                     rank, -1,
-                    longOf(source.get(KnowledgeIndex.fieldTableId()))));
+                    longOf(source.get(KnowledgeIndex.fieldTableId())),
+                    stringOf(source.get(KnowledgeIndex.fieldSectionPath())),
+                    intOf(source.get(KnowledgeIndex.fieldPageNo()))));
         }
         return hits;
     }
@@ -160,7 +174,9 @@ public class KnowledgeRetriever {
                     stringOf(source.get(KnowledgeIndex.fieldText())),
                     0, hit.score() == null ? 0 : hit.score(), 0,
                     -1, rank,
-                    longOf(source.get(KnowledgeIndex.fieldTableId()))));
+                    longOf(source.get(KnowledgeIndex.fieldTableId())),
+                    stringOf(source.get(KnowledgeIndex.fieldSectionPath())),
+                    intOf(source.get(KnowledgeIndex.fieldPageNo()))));
         }
         return hits;
     }
@@ -186,7 +202,8 @@ public class KnowledgeRetriever {
                     Hit base = merged.get(e.getKey());
                     return new Hit(base.vectorId(), base.docId(), base.chunkId(), base.title(),
                             base.content(), e.getValue(), base.vectorScore(), base.bm25Score(),
-                            base.bm25Rank(), base.knnRank(), base.tableId());
+                            base.bm25Rank(), base.knnRank(), base.tableId(),
+                            base.sectionPath(), base.pageNo());
                 })
                 .sorted(Comparator.comparingDouble(Hit::rrfScore).reversed())
                 .limit(topK)
@@ -201,7 +218,13 @@ public class KnowledgeRetriever {
                 vectorSide.content() != null ? vectorSide.content() : keywordSide.content(),
                 0, vectorSide.vectorScore(), keywordSide.bm25Score(),
                 keywordSide.bm25Rank(), vectorSide.knnRank(),
-                vectorSide.tableId() != null ? vectorSide.tableId() : keywordSide.tableId());
+                vectorSide.tableId() != null ? vectorSide.tableId() : keywordSide.tableId(),
+                vectorSide.sectionPath() != null ? vectorSide.sectionPath() : keywordSide.sectionPath(),
+                vectorSide.pageNo() != null ? vectorSide.pageNo() : keywordSide.pageNo());
+    }
+
+    private static Integer intOf(Object value) {
+        return value instanceof Number n ? n.intValue() : null;
     }
 
     private static Long longOf(Object value) {

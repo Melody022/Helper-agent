@@ -11,6 +11,7 @@ import com.jixiejia.agent.persistence.mapper.ai.AiKnowledgeDocMapper;
 import com.jixiejia.agent.persistence.mapper.ai.AiKnowledgeTableMapper;
 import com.jixiejia.agent.persistence.mapper.jxj.CmsArticleMapper;
 import com.jixiejia.agent.persistence.support.BizFilters;
+import com.jixiejia.agent.rag.parse.DocBlock;
 import com.jixiejia.agent.rag.parse.ParsedDocument;
 import com.jixiejia.agent.rag.parse.ParsedTable;
 import com.jixiejia.agent.tool.ToolSupport;
@@ -219,7 +220,8 @@ public class KnowledgeIngestionService {
             return -1;
         }
         try {
-            return indexDocument(doc, parsed.text(), parsed.tables());
+            // 传 blocks：切片会带上页码和章节路径，溯源与同章节回填都靠它
+            return indexDocument(doc, parsed.text(), parsed.tables(), parsed.blocks());
         } catch (Exception e) {
             // 把失败写进文档记录。否则文档会停在 PARSED、切片为 0，
             // 从管理页只看得出"没成功"，看不出为什么——实测就是这么排查了半天。
@@ -256,7 +258,7 @@ public class KnowledgeIngestionService {
 
     /** 切片 → 算向量 → 落库 → 建索引。文档内容变了会先清掉旧切片再重建。 */
     private int indexDocument(AiKnowledgeDoc doc, String text) throws Exception {
-        return indexDocument(doc, text, List.of());
+        return indexDocument(doc, text, List.of(), null);
     }
 
     /**
@@ -266,11 +268,19 @@ public class KnowledgeIngestionService {
      * 模型拿到缺表头的行会答错。所以表格本体存 {@code ai_knowledge_table} 不参与切片，
      * 只把"表头 + 标题 + 前几行"当摘要切成一个块，块上带 {@code tableId}；
      * 检索命中摘要后，再按 id 取回完整表格。
+     *
+     * @param blocks 带页码与章节路径的正文段；为 null 表示没有结构信息（按整篇文本切）
      */
-    private int indexDocument(AiKnowledgeDoc doc, String text, List<ParsedTable> tables) throws Exception {
+    private int indexDocument(AiKnowledgeDoc doc, String text, List<ParsedTable> tables,
+                              List<DocBlock> blocks) throws Exception {
         removeChunks(doc.getId());
 
-        List<TextChunker.Chunk> chunks = chunker.chunk(text);
+        // 有结构段就按段切（块继承页码和章节路径）；没有（FAQ、单篇文章）就当成
+        // 一个单页单章节的段——**至少让每块都带上"出处"**，溯源列表里才不会出现
+        // 一条没有出处的孤儿。对 FAQ 来说，"章节"就是这条问答的标题。
+        List<TextChunker.Chunk> chunks = (blocks == null || blocks.isEmpty())
+                ? chunker.chunk(List.of(new DocBlock(1, 1, doc.getTitle(), text == null ? "" : text)))
+                : chunker.chunk(blocks);
         List<TextChunker.Chunk> summaryChunks = indexTables(doc, tables);
 
         if (chunks.isEmpty() && summaryChunks.isEmpty()) {
@@ -287,7 +297,7 @@ public class KnowledgeIngestionService {
                 List<float[]> vectors = embeddingModel.embed(slice.stream().map(TextChunker.Chunk::content).toList());
                 for (int j = 0; j < slice.size(); j++) {
                     TextChunker.Chunk c = slice.get(j);
-                    saveChunk(doc, index++, c.content(), c.hash(), c.tableId(), vectors.get(j));
+                    saveChunk(doc, index++, c, vectors.get(j));
                 }
             }
         }
@@ -357,35 +367,47 @@ public class KnowledgeIngestionService {
             row.setContentHash(hash);
             tableMapper.insert(row);
 
+            // 表格摘要也带上"章节路径"和页码：它的"章节"就是表格标题（如"表 1 危险一览表"），
+            // 页码取表格起始页。这样溯源列表里它不会是一条没有出处的孤儿。
             summaries.add(new TextChunker.Chunk(seq, withContext,
-                    TextChunker.sha256(withContext), row.getId()));
+                    TextChunker.sha256(withContext), row.getId(),
+                    table.caption(), table.pageFrom()));
             seq++;
         }
         return summaries;
     }
 
-    /** 一个切片：MySQL 存原文，ES 存副本 + 向量。 */
-    private void saveChunk(AiKnowledgeDoc doc, int chunkIndex, String content, String hash,
-                           Long tableId, float[] vector) throws Exception {
+    /** 一个切片：MySQL 存原文与元数据，ES 存检索副本（正文 + 向量 + 元数据）。 */
+    private void saveChunk(AiKnowledgeDoc doc, int chunkIndex, TextChunker.Chunk chunk,
+                           float[] vector) throws Exception {
         AiKnowledgeChunk row = new AiKnowledgeChunk();
         row.setDocId(doc.getId());
         row.setChunkIndex(chunkIndex);
-        row.setContent(content);
-        row.setContentHash(hash);
-        row.setCharCount(content.length());
+        row.setContent(chunk.content());
+        row.setContentHash(chunk.hash());
+        row.setCharCount(chunk.content().length());
         row.setEmbeddingModel(embeddingModelName);
         row.setVectorId(KnowledgeIndex.vectorId(doc.getId(), chunkIndex));
-        row.setTableId(tableId);
+        row.setTableId(chunk.tableId());
+        row.setSectionPath(chunk.sectionPath());
+        row.setPageNo(chunk.pageNo());
         chunkMapper.insert(row);
 
         Map<String, Object> esDoc = new LinkedHashMap<>();
         esDoc.put(KnowledgeIndex.fieldDocId(), doc.getId());
         esDoc.put(KnowledgeIndex.fieldChunkId(), row.getId());
         esDoc.put(KnowledgeIndex.fieldTitle(), doc.getTitle());
-        esDoc.put(KnowledgeIndex.fieldText(), content);
+        esDoc.put(KnowledgeIndex.fieldText(), chunk.content());
         esDoc.put(KnowledgeIndex.fieldVector(), toFloatList(vector));
-        if (tableId != null) {
-            esDoc.put(KnowledgeIndex.fieldTableId(), tableId);
+        if (chunk.tableId() != null) {
+            esDoc.put(KnowledgeIndex.fieldTableId(), chunk.tableId());
+        }
+        // 章节路径和页码只有 ES 里也存一份，检索命中后才能直接拿来溯源
+        if (chunk.sectionPath() != null && !chunk.sectionPath().isBlank()) {
+            esDoc.put(KnowledgeIndex.fieldSectionPath(), chunk.sectionPath());
+        }
+        if (chunk.pageNo() != null) {
+            esDoc.put(KnowledgeIndex.fieldPageNo(), chunk.pageNo());
         }
 
         es.index(idx -> idx

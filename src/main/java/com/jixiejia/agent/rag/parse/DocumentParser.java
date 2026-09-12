@@ -129,23 +129,11 @@ public class DocumentParser {
         }
 
         String title = stripExtension(filename);
-        ParsedDocument parsed = switch (kind) {
+        return switch (kind) {
             case PLAIN_TEXT -> parsePlainText(title, bytes);
             case IMAGE -> parseImage(title, bytes);
             case LITEPARSE -> parseWithLiteParse(title, ext, bytes);
         };
-
-        // 标题优先取正文里的一级标题，取不到才退回文件名。
-        //
-        // 为什么重要：上传的国标文件名是 "GBT+25523-2022.pdf"，光看这个标题，
-        // 向量库里那条记录和"挖掘机"没有任何词面交集；而正文 H1 是
-        // "矿用机械正铲式挖掘机 安全要求"——**含"挖掘机"，是能被召回的关键**。
-        // 实测用户问"挖掘机生命周期可能出现什么危险因素"，表格摘要因为标题里
-        // 没有"挖掘机"而落选，明明表里就是答案。
-        String better = extractTitle(parsed.text(), title);
-        return better.equals(parsed.title()) ? parsed
-                : new ParsedDocument(parsed.text(), better, parsed.pageCount(),
-                        parsed.ocrPages(), parsed.tables(), parsed.warnings());
     }
 
     /**
@@ -311,16 +299,24 @@ public class DocumentParser {
 
             // ④ 逐页抽表 → 跨页合并 → 从正文里剔掉表格
             List<ParsedTable> tables = extractTablesFromPages(pageTexts, warnings);
-            StringBuilder body = new StringBuilder();
+
+            // ⑤ 把正文按「页 × 章节」拆开，挂上页码和章节路径。
+            //    这一步是溯源和上下文回填的地基——不做的话页码和章节归属就丢了。
+            List<String> bodyPages = new ArrayList<>(pageTexts.size());
             for (String pageText : pageTexts) {
-                List<MarkdownTableExtractor.Block> blocks =
-                        MarkdownTableExtractor.extract(List.of(pageText.split("\n", -1)));
-                body.append(MarkdownTableExtractor.removeTableBlocks(
-                        List.of(pageText.split("\n", -1)), blocks)).append('\n');
+                List<String> lines = List.of(pageText.split("\n", -1));
+                bodyPages.add(MarkdownTableExtractor.removeTableBlocks(
+                        lines, MarkdownTableExtractor.extract(lines)));
             }
 
-            return new ParsedDocument(body.toString().trim(), title, pageTexts.size(), ocrDone,
-                    tables, warnings);
+            // 标题要在建块**之前**定下来：识别不出章节时用它当兜底标签，
+            // 定晚了就得重建一遍块（而且很容易漏，把结构信息白白丢掉）
+            String body = String.join("\n", bodyPages);
+            String finalTitle = extractTitle(body, title);
+            List<DocBlock> blocks = buildBlocks(bodyPages, finalTitle, warnings);
+
+            return new ParsedDocument(body.trim(), finalTitle, pageTexts.size(), ocrDone,
+                    tables, warnings, blocks);
 
         } catch (IOException e) {
             throw new DocumentParseException("处理上传文件失败：" + e.getMessage(), e);
@@ -582,6 +578,137 @@ public class DocumentParser {
         return base.isBlank() ? "未命名文档" : base;
     }
 
+    // ---------------- 结构切分（页码 + 章节路径） ----------------
+
+    /**
+     * 把逐页的正文拆成带结构信息的段：**页 × 章节**。
+     *
+     * <p>为什么按这个粒度拆：页码和章节路径是溯源与上下文回填的两个锚点。
+     * 块跨页会让页码失真（"第 1-31 页"这种标注没有意义），所以**页码一变就断段**；
+     * 同一页内章节不变的行则连成一段，避免拆得过碎。
+     *
+     * <p>目录页在这里被**整页剔除**：它字面上和章节目录高度相似，
+     * 却没有实质内容，留着会在 Top-K 里占名额。
+     *
+     * @param fallbackSection 识别不出章节时的兜底标签（一般是文档标题）
+     */
+    public static List<DocBlock> buildBlocks(List<String> pageTexts, String fallbackSection,
+                                      List<String> warnings) {
+        SectionTracker tracker = new SectionTracker();
+        List<DocBlock> blocks = new ArrayList<>();
+
+        StringBuilder buf = new StringBuilder();
+        int from = -1;
+        int to = -1;
+        String section = null;
+        int skippedToc = 0;
+
+        for (int i = 0; i < pageTexts.size(); i++) {
+            int pageNo = i + 1;
+            List<String> lines = List.of(pageTexts.get(i).split("\n", -1));
+
+            if (isTocPage(lines)) {
+                skippedToc++;
+                continue;
+            }
+
+            for (String line : lines) {
+                String current = tracker.accept(line);
+                if (current.isBlank()) {
+                    current = fallbackSection;
+                }
+                // 页码或章节任一变化就断段
+                boolean sameSegment = from > 0 && pageNo == to && current.equals(section);
+                if (!sameSegment) {
+                    addBlock(blocks, buf, from, to, section);
+                    buf.setLength(0);
+                    from = pageNo;
+                    section = current;
+                }
+                to = pageNo;
+                buf.append(line).append('\n');
+            }
+        }
+        addBlock(blocks, buf, from, to, section);
+
+        List<DocBlock> merged = mergeTinyBlocks(blocks);
+
+        if (skippedToc > 0) {
+            warnings.add("已跳过 " + skippedToc + " 页目录（目录没有实质内容，留着会占检索名额）");
+        }
+        return merged;
+    }
+
+    /**
+     * 太短的段并入**下一段**。
+     *
+     * <p>为什么必要：章节标题行往往自己占一段（比如只有 {@code 5 安全要求} 十个字）。
+     * 这种段单独切出来就是个十字块的切片，检索命中它没有任何信息量，纯属污染索引。
+     * 而标题在语义上本来就该和它领起的内容在一起，所以**往后并**而不是往前并。
+     *
+     * <p>最后一段如果还是太短，并进前一段（文档末尾的孤立标题）。
+     */
+    private static List<DocBlock> mergeTinyBlocks(List<DocBlock> blocks) {
+        final int minChars = 40;   // 与 TextChunker 的碎块阈值保持一致
+        List<DocBlock> out = new ArrayList<>();
+        DocBlock pending = null;
+
+        for (DocBlock b : blocks) {
+            if (pending != null) {
+                b = new DocBlock(pending.pageNo(), b.pageTo(), b.sectionPath(),
+                        pending.text() + "\n" + b.text());
+                pending = null;
+            }
+            if (b.text().length() < minChars) {
+                pending = b;
+            } else {
+                out.add(b);
+            }
+        }
+
+        if (pending != null) {
+            if (out.isEmpty()) {
+                out.add(pending);
+            } else {
+                DocBlock last = out.remove(out.size() - 1);
+                out.add(new DocBlock(last.pageNo(), pending.pageTo(), last.sectionPath(),
+                        last.text() + "\n" + pending.text()));
+            }
+        }
+        return out;
+    }
+
+    private static void addBlock(List<DocBlock> out, StringBuilder buf, int from, int to, String section) {
+        String text = buf.toString().trim();
+        if (from > 0 && !text.isBlank()) {
+            out.add(new DocBlock(from, to, section, text));
+        }
+    }
+
+    /**
+     * 这一页是不是目录页。
+     *
+     * <p>判据：非空行里有**一半以上**是目录行（"5.4 润滑系统 …………… 9"）。
+     * 要求至少 3 个非空行，避免把只有一两行的页误判。
+     *
+     * <p>局限：OCR 出来的目录如果没渲染出点线（有些扫描件页码是空格对齐的），
+     * 这一页就识别不出来——那是**漏优化**而不是错判，可以接受。
+     */
+    private static boolean isTocPage(List<String> lines) {
+        int nonBlank = 0;
+        int toc = 0;
+        for (String line : lines) {
+            if (line.isBlank()) {
+                continue;
+            }
+            nonBlank++;
+            if (SectionTracker.isTocLine(line)) {
+                toc++;
+            }
+        }
+        return nonBlank >= 3 && toc * 2 >= nonBlank;
+    }
+
     /** 给纯文本/图片路径补上表格抽取，保持三条路径输出一致。 */
     private ParsedDocument assemble(String title, String rawText, int pageCount, int ocrPages,
                                     List<String> extraWarnings) {
@@ -595,8 +722,15 @@ public class DocumentParser {
         }
 
         List<String> warnings = new ArrayList<>(extraWarnings);
-        return new ParsedDocument(MarkdownTableExtractor.removeTableBlocks(lines, blocks).trim(),
-                title, pageCount, ocrPages, tables, warnings);
+        String body = MarkdownTableExtractor.removeTableBlocks(lines, blocks);
+
+        // 先定标题再建块：markdown 的 # 标题能直接变成章节路径，
+        // 识别不出章节的就用文档标题兜底。单页文档没有页码可言，页码统一记 1。
+        String finalTitle = extractTitle(body, title);
+        List<DocBlock> docBlocks = buildBlocks(List.of(body), finalTitle, warnings);
+
+        return new ParsedDocument(body.trim(), finalTitle, pageCount, ocrPages,
+                tables, warnings, docBlocks);
     }
 
     private static void deleteQuietly(Path dir) {

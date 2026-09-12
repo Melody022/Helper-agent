@@ -1,10 +1,12 @@
 package com.jixiejia.agent.rag;
 
+import com.jixiejia.agent.rag.parse.DocBlock;
 import com.jixiejia.agent.rag.parse.DocumentParseException;
 import com.jixiejia.agent.rag.parse.DocumentParser;
 import com.jixiejia.agent.rag.parse.MarkdownTableExtractor;
 import com.jixiejia.agent.rag.parse.ParsedDocument;
 import com.jixiejia.agent.rag.parse.ParsedTable;
+import com.jixiejia.agent.rag.parse.SectionTracker;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
@@ -272,6 +274,136 @@ class DocumentUploadTest {
         assertThat(DocumentParser.extractTitle(noise, "fallback.pdf")).isEqualTo("fallback.pdf");
         assertThat(DocumentParser.extractTitle("", "empty.pdf")).isEqualTo("empty.pdf");
         assertThat(DocumentParser.extractTitle(null, "null.pdf")).isEqualTo("null.pdf");
+    }
+
+    // ---------------- 章节路径识别 ----------------
+
+    @Test
+    @DisplayName("章节识别：markdown 标题按 # 的个数定层级")
+    void tracksMarkdownHeadings() {
+        SectionTracker t = new SectionTracker();
+
+        assertThat(t.accept("# 退货政策")).isEqualTo("退货政策");
+        assertThat(t.accept("正文…")).isEqualTo("退货政策");
+        assertThat(t.accept("## 无理由退货")).isEqualTo("退货政策 > 无理由退货");
+        assertThat(t.accept("### 例外情况")).isEqualTo("退货政策 > 无理由退货 > 例外情况");
+        // 同级标题替换而非叠加
+        assertThat(t.accept("## 运费承担")).isEqualTo("退货政策 > 运费承担");
+    }
+
+    @Test
+    @DisplayName("章节识别：条款编号按点分段数定层级（扫描件 OCR 没有 # 标记，编号是唯一锚点）")
+    void tracksClauseNumbers() {
+        SectionTracker t = new SectionTracker();
+
+        assertThat(t.accept("5 安全要求")).isEqualTo("5 安全要求");
+        assertThat(t.accept("5.4 润滑系统")).isEqualTo("5 安全要求 > 5.4 润滑系统");
+        assertThat(t.accept("5.5 电气系统")).isEqualTo("5 安全要求 > 5.5 电气系统");
+        assertThat(t.accept("6 试验方法")).isEqualTo("6 试验方法");
+    }
+
+    @Test
+    @DisplayName("章节识别：更深的编号只是条内序号，不该把每一款都变成一节")
+    void ignoresDeepClauseNumbers() {
+        SectionTracker t = new SectionTracker();
+        t.accept("5 安全要求");
+        t.accept("5.4 润滑系统");
+
+        // 再往下的 5.4.4.1 是"款"，如果它也算章节，每个句子都会自成一段，
+        // 回填时反而取不到上下文
+        assertThat(t.accept("5.4.4.1 润滑系统应安全可靠")).isEqualTo("5 安全要求 > 5.4 润滑系统");
+        assertThat(t.accept("5.4.4.2 减速机应…")).isEqualTo("5 安全要求 > 5.4 润滑系统");
+    }
+
+    @Test
+    @DisplayName("章节识别：年份不能被当成章节号")
+    void doesNotTreatYearAsClause() {
+        SectionTracker t = new SectionTracker();
+        t.accept("5 安全要求");
+
+        // 国标正文里到处是 "GB/T 25523—2022"，但 "2022 年" 这种行也可能以数字开头
+        assertThat(t.accept("2022 年第 3 号公告"))
+                .as("年份行不该冲掉当前章节")
+                .isEqualTo("5 安全要求");
+    }
+
+    @Test
+    @DisplayName("目录行识别：点线连页码的才是目录行")
+    void detectsTocLines() {
+        assertThat(SectionTracker.isTocLine("5.4 润滑系统 ……………………………… 9")).isTrue();
+        assertThat(SectionTracker.isTocLine("1 范围 ......... 1")).isTrue();
+        // 正文行不是目录行
+        assertThat(SectionTracker.isTocLine("5.4 润滑系统")).isFalse();
+        assertThat(SectionTracker.isTocLine("润滑系统应安全可靠，见 GB/T 25523")).isFalse();
+    }
+
+    // ---------------- 结构切分（页码 × 章节） ----------------
+
+    @Test
+    @DisplayName("结构切分：页码变化就断段，同一页内同章节连成一段")
+    void blocksBreakAtPageBoundary() {
+        List<String> pages = List.of(
+                "5 安全要求\n5.4 润滑系统\n润滑系统应安全可靠，并设置压力指示装置，"
+                        + "当润滑系统发生故障应发出报警信号。\n5.4.4.2 减速机应便于维护。",
+                "5.4 润滑系统\n减速机应设置油位观察窗，便于日常检查油位是否正常，"
+                        + "油位过低时应及时补充。");
+
+        List<DocBlock> blocks = DocumentParser.buildBlocks(pages, "文档标题", new java.util.ArrayList<>());
+
+        assertThat(blocks).as("两页各自成段（页码是断段依据）").hasSize(2);
+        assertThat(blocks.get(0).pageNo()).isEqualTo(1);
+        assertThat(blocks.get(0).sectionPath()).isEqualTo("5 安全要求 > 5.4 润滑系统");
+        assertThat(blocks.get(1).pageNo()).isEqualTo(2);
+        // 第 2 页接着同一节，路径不变
+        assertThat(blocks.get(1).sectionPath()).isEqualTo("5 安全要求 > 5.4 润滑系统");
+        assertThat(blocks.get(1).text()).contains("油位观察窗");
+    }
+
+    @Test
+    @DisplayName("结构切分：章节标题行留下的碎段并入下一段，不产生孤立小块")
+    void mergesTinyHeadingBlocksForward() {
+        // 只有一行章节标题时，它自己会成为一个 10 个字的段。
+        // 这种段切出来就是十字切片，检索命中它没有任何信息量，纯属污染索引。
+        List<String> pages = List.of("5 安全要求\n本文件规定了矿用机械正铲式挖掘机的安全要求，"
+                + "给出了其在全生命周期内可能产生的危险。");
+
+        List<DocBlock> blocks = DocumentParser.buildBlocks(pages, "文档标题", new java.util.ArrayList<>());
+
+        assertThat(blocks).hasSize(1);
+        assertThat(blocks.get(0).text())
+                .as("标题应当和它领起的内容在同一段里")
+                .contains("5 安全要求")
+                .contains("全生命周期");
+    }
+
+    @Test
+    @DisplayName("结构切分：目录页整页剔除，并留下说明")
+    void excludesTocPages() {
+        List<String> pages = List.of(
+                "目 次\n1 范围 ……………………………… 1\n2 规范性引用文件 …………………… 2\n"
+                        + "3 术语和定义 ……………………… 3\n5.4 润滑系统 ……………………… 9",
+                "1 范围\n本文件规定了矿用机械正铲式挖掘机的安全要求。");
+
+        List<String> warnings = new java.util.ArrayList<>();
+        List<DocBlock> blocks = DocumentParser.buildBlocks(pages, "文档标题", warnings);
+
+        assertThat(blocks).as("目录页不该产生任何块").hasSize(1);
+        assertThat(blocks.get(0).pageNo()).isEqualTo(2);
+        assertThat(blocks.get(0).text()).contains("矿用机械正铲式挖掘机");
+        assertThat(warnings).anyMatch(w -> w.contains("目录"));
+    }
+
+    @Test
+    @DisplayName("结构切分：识别不出章节时用文档标题兜底，且页码仍然保留")
+    void fallsBackToDocumentTitle() {
+        List<String> pages = List.of("一段没有任何章节标记的正文。");
+
+        List<DocBlock> blocks = DocumentParser.buildBlocks(
+                pages, "某份说明书", new java.util.ArrayList<>());
+
+        assertThat(blocks).hasSize(1);
+        assertThat(blocks.get(0).sectionPath()).isEqualTo("某份说明书");
+        assertThat(blocks.get(0).pageLabel()).isEqualTo("第 1 页");
     }
 
     // ---------------- 输入校验 ----------------

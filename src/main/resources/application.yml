@@ -196,6 +196,10 @@ rag:
     candidates: ${RAG_CANDIDATES:20}
     # KNN 考察的候选向量数，必须 >= candidates
     num-candidates: ${RAG_NUM_CANDIDATES:100}
+    # 同章节回填：命中块所在章节的前后邻块也一起喂给模型。
+    # 解决"条款被切成几块、模型只看到半截"——这是父子块（small-to-big）的轻量形态：
+    # 不做严格的父块存储，用 section_path 这个天然归属把兄弟块聚起来。
+    sibling-expand: ${RAG_SIBLING_EXPAND:true}
 
   # 证据闸：资料不够就不让模型开口
   evidence-gate:
