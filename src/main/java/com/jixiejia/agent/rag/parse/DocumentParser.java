@@ -16,6 +16,7 @@ import java.util.Map;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * 文档解析的总入口：把上传的文件变成「正文 + 表格列表」。
@@ -334,8 +335,21 @@ public class DocumentParser {
      * <b>必须用"分隔符个数 == 页数-1"交叉校验</b>：文档正文里本来就可能出现短横线
      * （表格分隔、水平线），万一真出现一个孤立的 {@code -----}，切错了会把正文搅乱。
      * 对不上就整篇当成一页，宁可不分页也不要错位。
+     *
+     * <p>⚠️ <b>返回的列表必须是可变的</b>（哪怕只有一页）：调用方 {@link #applyOcr}
+     * 会把 OCR 结果<b>写回</b>这个列表。这两条兜底分支原来返回的是 {@code List.of(...)}
+     * ——那是不可变列表，于是"分页符对不上"的时候 {@code set()} 会抛
+     * {@code UnsupportedOperationException}，被外层 catch 兜住，<b>整篇 OCR 的文字全丢</b>，
+     * 只留一条 warning。而那条 warning 写的是"本次不做分页处理（跨页表格可能无法合并）"，
+     * 读起来像只丢了个小功能，实际上是 OCR 全废。
+     *
+     * <p>最典型的触发场景是<b>单页扫描件</b>：它本来就没有分页符，必然走第二条兜底，
+     * 于是"传一张单页扫描的 PDF" = "OCR 一定失败"。
+     *
+     * <p>可见性用包级（不是 private）是为了能直接单测——这类"兜底路径其实不兜底"的问题
+     * 跑真实文档很难稳定复现，但纯函数一测就露。顺带：分页是纯函数，不依赖实例状态。
      */
-    private List<String> splitPages(String markdown, int expectedPages, List<String> warnings) {
+    static List<String> splitPages(String markdown, int expectedPages, List<String> warnings) {
         List<String> lines = List.of(markdown.split("\n", -1));
         List<Integer> separators = new ArrayList<>();
         for (int i = 0; i < lines.size(); i++) {
@@ -348,10 +362,10 @@ public class DocumentParser {
             warnings.add(String.format(
                     "分页符数量（%d）与页数（%d）对不上，本次不做分页处理（跨页表格可能无法合并）",
                     separators.size(), expectedPages));
-            return List.of(markdown);
+            return singlePage(markdown);
         }
         if (separators.isEmpty()) {
-            return List.of(markdown);
+            return singlePage(markdown);
         }
 
         List<String> pages = new ArrayList<>();
@@ -361,6 +375,18 @@ public class DocumentParser {
             from = sep + 1;
         }
         pages.add(String.join("\n", lines.subList(from, lines.size())));
+        return pages;
+    }
+
+    /**
+     * 兜底：整篇当成一页。
+     *
+     * <p><b>必须是可变的</b>——{@link #applyOcr} 要往这个列表里写回 OCR 结果，
+     * 返回 {@code List.of(...)} 会让那一页的 OCR 白做（见 {@link #splitPages} 的说明）。
+     */
+    private static List<String> singlePage(String markdown) {
+        List<String> pages = new ArrayList<>(1);
+        pages.add(markdown);
         return pages;
     }
 
@@ -394,6 +420,10 @@ public class DocumentParser {
                 return t;
             });
 
+            // 已完成计数。并发下日志本来就是乱序的，只有"完成了几页"才反映进度；
+            // 页码是身份，两者要分开说（见下面的日志）。
+            AtomicInteger finished = new AtomicInteger();
+
             List<Future<String>> futures = new ArrayList<>(count);
             for (int i = 0; i < count; i++) {
                 Path image = images.get(i);
@@ -404,8 +434,14 @@ public class DocumentParser {
                         // 逐页记日志。不记的话这个流程完全不可观测——
                         // 实测用户传一份 15 页扫描件等了十几分钟，日志里只有一条
                         // "lit 拿到了输出"，根本看不出是在推进还是卡死了。
-                        log.info("OCR 完成：第 {}/{} 页（页码 {}），{} 字",
-                                pageNo, ocrPages.size(), pageNo,
+                        //
+                        // ⚠️ 分子是**完成计数**，分母是**需要 OCR 的页数**，页码另标。
+                        // 这里曾经把"绝对页码"当分子、"需 OCR 页数"当分母，于是
+                        // 31 页的文档打出"第 28/21 页"——看起来像自相矛盾
+                        // （用户就是这么报过来的：以为"进度表能切 30 多"）。
+                        // 其实 21 是"需要 OCR 的页数"，跟文档总页数不是一回事。
+                        log.info("OCR 完成：第 {}/{} 页（原文第 {} 页），{} 字",
+                                finished.incrementAndGet(), count, pageNo,
                                 text == null ? 0 : text.length());
                         return text;
                     } catch (Exception e) {
@@ -416,7 +452,8 @@ public class DocumentParser {
                 }));
             }
 
-            log.info("开始 OCR：共 {} 页，并发度 {}", count, Math.max(1, Math.min(ocrConcurrency, count)));
+            log.info("开始 OCR：共 {} 页需要识别（文档共 {} 页），并发度 {}",
+                    count, pageTexts.size(), Math.max(1, Math.min(ocrConcurrency, count)));
 
             int done = 0;
             for (int i = 0; i < count; i++) {
