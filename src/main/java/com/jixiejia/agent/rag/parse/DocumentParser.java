@@ -69,6 +69,16 @@ public class DocumentParser {
 
     private enum Kind { LITEPARSE, PLAIN_TEXT, IMAGE }
 
+    /**
+     * 哪些格式才需要判断"这页有没有文本层"。
+     *
+     * <p><b>只有 PDF</b>：它既可能是原生电子版（有文本层），也可能是扫描件（没有）。
+     * Office 文档是从文字格式生成的，一定有文本层；图片走 {@link Kind#IMAGE} 分支直接 OCR。
+     * 对这两类做"要不要 OCR"的探测没有意义，还会踩到 LiteParse 对 Office 文档
+     * 处理不一致的问题（见 {@link #parseWithLiteParse} 里的注释）。
+     */
+    private static final java.util.Set<String> MAY_NEED_OCR = java.util.Set.of("pdf");
+
     private final LiteParseClient liteParse;
     private final MultimodalOcrClient ocr;
 
@@ -151,11 +161,28 @@ public class DocumentParser {
             List<String> warnings = new ArrayList<>();
 
             // ① 逐页探测，决定哪些页需要 OCR
-            List<LiteParseClient.PageInfo> pages = liteParse.inspect(file);
-            List<Integer> ocrPages = pages.stream()
-                    .filter(p -> p.needsRealOcr(coverageThreshold))
-                    .map(LiteParseClient.PageInfo::pageNumber)
-                    .toList();
+            //
+            // ⚠️ 只对 PDF 做这一步。Office 文档（docx/xlsx/pptx）本来就是从文字格式生成的，
+            // **永远有文本层、永远不需要 OCR**；而实测 `lit is-complex` 对 Office 文档会报
+            // "LibreOffice is not installed"（同一个文件 `lit parse` 却正常）——
+            // 照原样走下去会把正常 docx 判成"有扫描页"，再触发一次注定失败的截图，
+            // 用户看到一条莫名其妙的"扫描页 OCR 失败"警告。
+            //
+            // 探测本身也做成非致命：探测失败就退化成"不做 OCR"，而不是整篇解析失败。
+            List<Integer> ocrPages = List.of();
+            int pageCount = 1;
+            if (MAY_NEED_OCR.contains(ext)) {
+                try {
+                    List<LiteParseClient.PageInfo> pages = liteParse.inspect(file);
+                    pageCount = pages.size();
+                    ocrPages = pages.stream()
+                            .filter(p -> p.needsRealOcr(coverageThreshold))
+                            .map(LiteParseClient.PageInfo::pageNumber)
+                            .toList();
+                } catch (Exception e) {
+                    warnings.add("文档结构探测失败，本次不做 OCR 处理：" + e.getMessage());
+                }
+            }
 
             if (ocrPages.size() > maxOcrPages) {
                 throw new DocumentParseException(String.format(
@@ -166,7 +193,7 @@ public class DocumentParser {
 
             // ② 整篇抽 markdown，按分页符切成每页
             String markdown = liteParse.parseMarkdown(file, null);
-            List<String> pageTexts = splitPages(markdown, pages.size(), warnings);
+            List<String> pageTexts = splitPages(markdown, pageCount, warnings);
 
             // ③ 需要 OCR 的页，用多模态重写该页内容
             int ocrDone = 0;
