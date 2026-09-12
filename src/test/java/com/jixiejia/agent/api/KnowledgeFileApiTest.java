@@ -39,6 +39,7 @@ import java.util.List;
 import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.delete;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.multipart;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
@@ -208,6 +209,26 @@ class KnowledgeFileApiTest {
                 // （不校验文件名：Content-Disposition 里的中文名是 RFC 5987 百分号编码的，
                 //   写 containsString("费率说明.txt") 会假失败）
                 .andExpect(MockMvcResultMatchers.content().bytes(text("下载")));
+    }
+
+    @Test
+    @DisplayName("删文档要把磁盘上的原件一起删掉")
+    void deleteDocumentRemovesOriginalFile() throws Exception {
+        byte[] bytes = text("删除");
+        Long id = upload("费率说明.txt", bytes);
+
+        String filePath = docMapper.selectById(id).getFilePath();
+        Path onDisk = fileStore.resolve(filePath);
+        assertThat(onDisk).exists();
+
+        mockMvc.perform(delete("/api/admin/knowledge/docs/" + id)
+                        .header("Authorization", "Bearer " + adminToken))
+                .andExpect(status().isOk());
+
+        // 不删的话它会**永远**留在磁盘上——这个目录没有别的清理机制，
+        // 而"删除文档"在用户看来就是"这东西没了"。
+        assertThat(onDisk).doesNotExist();
+        createdDocIds.remove(id);   // 已经删过了，tearDown 不用再管
     }
 
     @Test

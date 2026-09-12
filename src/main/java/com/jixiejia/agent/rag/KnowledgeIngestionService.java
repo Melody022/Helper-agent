@@ -75,6 +75,7 @@ public class KnowledgeIngestionService {
     private final EmbeddingModel embeddingModel;
     private final ElasticsearchClient es;
     private final KnowledgeIndex knowledgeIndex;
+    private final KnowledgeFileStore fileStore;
     private final ResourceLoader resourceLoader;
 
     @Value("${rag.embedding-model:text-embedding-v4}")
@@ -253,6 +254,14 @@ public class KnowledgeIngestionService {
         }
         removeChunks(docId);
         docMapper.deleteById(docId);
+        // 原件和预览件也要一起删。
+        //
+        // 不删的话它们会**永远**留在磁盘上：这个目录没有任何别的清理机制，
+        // 而"删除文档"在用户看来就是"这东西没了"。实测就是这么发现的——
+        // 删完文档去看落盘目录，文件还在。
+        // 用 deleteQuietly：清理失败只记日志，不该把"文档已删"这个结论推翻。
+        fileStore.deleteQuietly(doc.getFilePath());
+        fileStore.deleteQuietly(doc.getPreviewPath());
         return true;
     }
 
