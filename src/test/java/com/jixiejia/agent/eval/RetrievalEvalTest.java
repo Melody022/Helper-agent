@@ -12,6 +12,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
 import org.springframework.ai.embedding.EmbeddingModel;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.test.context.SpringBootTest;
 
 import java.util.ArrayList;
@@ -147,6 +148,16 @@ class RetrievalEvalTest {
     /** 检索取多少条，与 {@code rag.retrieval.top-k} 保持一致。 */
     private static final int TOP_K = 5;
 
+    /**
+     * 精排前先召回多少条候选，与 {@code rag.retrieval.rerank-candidates} 保持一致。
+     *
+     * <p>线上是「召回这么些条 → 精排排序 → 取前 {@link #TOP_K} 条喂模型」，
+     * 所以只看融合层的 top-5 会低估系统的实际能力：真正被淘汰的候选，
+     * 有一部分本来能被精排捞回来。
+     */
+    @Value("${rag.retrieval.rerank-candidates:20}")
+    private int rerankCandidates;
+
     /** 正式评估：Recall@K 三路对比 + 证据闸阈值曲线。 */
     @Test
     @DisplayName("检索评估：三路召回 Recall@K 对比 + 证据闸阈值校准")
@@ -158,18 +169,20 @@ class RetrievalEvalTest {
         ingestionService.ingestArticles();
         Thread.sleep(1500);   // ES 近实时，写入后要等一个刷新周期
 
-        // ① 三路召回各自的 Recall@5
+        // ① 三路召回各自的 Recall@5 + 「召回 20 → 精排 → 取 5」的整条流水线
         Map<String, double[]> modes = new LinkedHashMap<>();   // 模式名 -> [命中条数, 总数]
-        for (String mode : List.of("bm25", "vector", "hybrid")) {
+        for (String mode : List.of("bm25", "vector", "hybrid", "pipeline")) {
             modes.put(mode, new double[]{0, 0});
         }
         List<String> misses = new ArrayList<>();
+        List<String> pipelineMisses = new ArrayList<>();
 
         for (Sample sample : LABELED) {
             for (String mode : modes.keySet()) {
                 List<KnowledgeRetriever.Hit> hits = switch (mode) {
                     case "bm25" -> retrieveBm25Only(sample.question(), 5);
                     case "vector" -> retrieveVectorOnly(sample.question(), 5);
+                    case "pipeline" -> retrievePipeline(sample.question(), 5);
                     default -> retriever.retrieve(sample.question(), 5);
                 };
                 modes.get(mode)[1]++;
@@ -177,6 +190,10 @@ class RetrievalEvalTest {
                     modes.get(mode)[0]++;
                 } else if ("hybrid".equals(mode)) {
                     misses.add(String.format("  %-28s 期望 %s%n      实际 %s",
+                            sample.question(), List.of(sample.expectedTitles()),
+                            hits.stream().map(KnowledgeRetriever.Hit::title).toList()));
+                } else if ("pipeline".equals(mode)) {
+                    pipelineMisses.add(String.format("  %-28s 期望 %s%n      实际 %s",
                             sample.question(), List.of(sample.expectedTitles()),
                             hits.stream().map(KnowledgeRetriever.Hit::title).toList()));
                 }
@@ -193,7 +210,7 @@ class RetrievalEvalTest {
             negativeFeatures.add(features(question));
         }
 
-        System.out.println(buildReport(modes, misses, positiveFeatures, negativeFeatures, gate));
+        System.out.println(buildReport(modes, misses, pipelineMisses, positiveFeatures, negativeFeatures, gate));
 
         // 断言下限而不是精确值：embedding 接口与 ES 都有波动。
         // 但混合召回若明显退化（比如掉到 60% 以下），说明链路真出问题了。
@@ -251,6 +268,40 @@ class RetrievalEvalTest {
                     0, hit.score() == null ? 0 : hit.score(), 0, -1, rank));
         }
         return hits;
+    }
+
+    /**
+     * 完整流水线：混合召回 {@code rerankCandidates} 条 → 精排排序 → 取前 topK 条。
+     *
+     * <p>这才是线上真正喂给模型的 5 条，也是唯一有资格写进结论的召回数字。
+     * 只用 {@code retriever.retrieve(q, 5)} 量的是融合层，会低估——
+     * 融合层排在第 6~20 名、但精排能捞回来的那些资料，在那种口径下全被算成"漏了"。
+     */
+    private List<KnowledgeRetriever.Hit> retrievePipeline(String query, int topK) {
+        try {
+            List<KnowledgeRetriever.Hit> candidates = retriever.retrieve(query, rerankCandidates);
+            List<Double> scores = rerankScorer.scoreAll(query,
+                    candidates.stream().map(EvidenceGate::rerankText).toList());
+            if (scores == null || scores.size() != candidates.size()) {
+                // 精排不可用时线上会退回融合顺序，评估也照这个退法，别造出一个线上不存在的路径
+                return candidates.size() > topK ? candidates.subList(0, topK) : candidates;
+            }
+            List<KnowledgeRetriever.Hit> ranked = new ArrayList<>(candidates);
+            List<Double> order = new ArrayList<>(scores);
+            // 按下标一起排，避免"分数排序后和资料对不上"
+            Integer[] idx = new Integer[ranked.size()];
+            for (int i = 0; i < idx.length; i++) {
+                idx[i] = i;
+            }
+            java.util.Arrays.sort(idx, (a, b) -> Double.compare(order.get(b), order.get(a)));
+            List<KnowledgeRetriever.Hit> result = new ArrayList<>();
+            for (int i = 0; i < Math.min(topK, idx.length); i++) {
+                result.add(ranked.get(idx[i]));
+            }
+            return result;
+        } catch (Exception e) {
+            return List.of();
+        }
     }
 
     /**
@@ -319,6 +370,7 @@ class RetrievalEvalTest {
     // ---------------- 报告 ----------------
 
     private String buildReport(Map<String, double[]> modes, List<String> misses,
+                               List<String> pipelineMisses,
                                List<Feature> positive, List<Feature> negative, EvidenceGate gate) {
         StringBuilder sb = new StringBuilder();
         int k = 5;
@@ -327,16 +379,21 @@ class RetrievalEvalTest {
         sb.append(String.format("标注集：%d 条有答案 + %d 条无答案%n",
                 LABELED.size(), UNANSWERABLE.size()));
 
-        sb.append("\n---- Recall@").append(k).append("：三路召回对比 ----\n");
-        sb.append("  （这是「混合召回比单路好」的直接证据）\n");
+        sb.append("\n---- Recall@").append(k).append("：三种口径对比 ----\n");
+        sb.append("  （bm25/vector/hybrid 只到融合层；pipeline 才是线上真正喂给模型的 5 条）\n");
         for (Map.Entry<String, double[]> e : modes.entrySet()) {
             double[] stat = e.getValue();
             sb.append(String.format("  %-8s %2.0f/%2.0f  %5.1f%%%n",
                     e.getKey(), stat[0], stat[1], 100.0 * stat[0] / stat[1]));
         }
 
+        if (!pipelineMisses.isEmpty()) {
+            sb.append("\n---- 流水线真正漏掉的（线上会答偏/答不上的）----\n");
+            pipelineMisses.forEach(m -> sb.append(m).append('\n'));
+        }
+
         if (!misses.isEmpty()) {
-            sb.append("\n---- 混合召回漏掉的（这些就是可以优化检索的 case）----\n");
+            sb.append("\n---- 融合层漏掉、但精排可能捞回来的（只作诊断用）----\n");
             misses.forEach(m -> sb.append(m).append('\n'));
         }
 
