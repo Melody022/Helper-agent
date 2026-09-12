@@ -5,9 +5,12 @@ import com.jixiejia.agent.llm.ModelCaller;
 import com.jixiejia.agent.llm.PromptLibrary;
 import com.baomidou.mybatisplus.core.toolkit.Wrappers;
 import com.jixiejia.agent.persistence.entity.ai.AiKnowledgeChunk;
+import com.jixiejia.agent.persistence.entity.ai.AiKnowledgeDoc;
 import com.jixiejia.agent.persistence.entity.ai.AiKnowledgeTable;
 import com.jixiejia.agent.persistence.mapper.ai.AiKnowledgeChunkMapper;
+import com.jixiejia.agent.persistence.mapper.ai.AiKnowledgeDocMapper;
 import com.jixiejia.agent.persistence.mapper.ai.AiKnowledgeTableMapper;
+import com.jixiejia.agent.rag.parse.DocumentParser;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
@@ -65,6 +68,7 @@ public class KnowledgeAnswerService {
     private final PromptLibrary prompts;
     private final AiKnowledgeTableMapper tableMapper;
     private final AiKnowledgeChunkMapper chunkMapper;
+    private final AiKnowledgeDocMapper docMapper;
 
     @Value("${rag.retrieval.top-k:5}")
     private int topK;
@@ -105,12 +109,16 @@ public class KnowledgeAnswerService {
     /**
      * 一条答案依据。给前端做溯源展示用。
      *
+     * @param docId       所属知识文档 id。<b>前端据此决定打开哪份原件</b>，缺了它点角标就没处可去
      * @param title       文档标题
      * @param sectionPath 章节路径，如 {@code "5 安全要求 > 5.4 润滑系统"}；没有时为 null
      * @param pageNo      页码（1 起）；没有时为 null
      * @param snippet     正文片段（截断过），供前端展示"依据原文"
+     * @param previewable 这份原件有没有浏览器能直接看的形式（PDF/图片/纯文本，或 Office 已转出 PDF）。
+     *                    提前告诉前端，免得点开一个角标才发现没有预览、还要等一次失败的请求
      */
-    public record Source(String title, String sectionPath, Integer pageNo, String snippet) {
+    public record Source(Long docId, String title, String sectionPath, Integer pageNo,
+                         String snippet, boolean previewable) {
     }
 
     /** 单次知识问答的结果。 */
@@ -126,18 +134,46 @@ public class KnowledgeAnswerService {
     /**
      * 把喂给模型的资料整理成溯源列表。
      *
-     * <p>顺序就是喂给模型的顺序——前端按序号展示时，和答案里可能出现的引用能对上。
+     * <p>顺序就是喂给模型的顺序——资料在提示词里是 {@code <1><2>} 标号的，
+     * 模型标的 {@code [1]} 指的就是这个顺序的第 1 条，所以<b>顺序不能动</b>。
+     *
+     * <p>可见性用包级（不是 private）是为了能直接单测：这个方法少带一个字段
+     * 不会报任何错，只会让前端的溯源悄悄失效，必须有测试盯着。
      */
-    private static List<Source> toSources(List<KnowledgeRetriever.Hit> hits) {
+    static List<Source> toSources(List<KnowledgeRetriever.Hit> hits,
+                                  Map<Long, AiKnowledgeDoc> docsById) {
         List<Source> sources = new ArrayList<>(hits.size());
         for (KnowledgeRetriever.Hit h : hits) {
             String content = h.content() == null ? "" : h.content().replace("\n", " ");
-            sources.add(new Source(h.title(),
+            AiKnowledgeDoc doc = h.docId() == null ? null : docsById.get(h.docId());
+            sources.add(new Source(
+                    h.docId(),
+                    h.title(),
                     h.sectionPath(),
                     h.pageNo(),
-                    content.length() <= 160 ? content : content.substring(0, 160) + "…"));
+                    content.length() <= 160 ? content : content.substring(0, 160) + "…",
+                    previewable(doc)));
         }
         return sources;
+    }
+
+    /**
+     * 这份原件有没有浏览器能直接看的形式。
+     *
+     * <p>和 {@code KnowledgeFileController} 里的取件逻辑是同一条规则：
+     * <b>默认原件就能看，只有 Office 要看转换成功没有</b>。
+     * 两边必须一致——否则会出现"前端以为能预览、点开却是 404"。
+     */
+    static boolean previewable(AiKnowledgeDoc doc) {
+        if (doc == null || doc.getFilePath() == null || doc.getFilePath().isBlank()) {
+            return false;
+        }
+        String ext = DocumentParser.extensionOf(doc.getFilePath());
+        return switch (KnowledgeFileStore.kindOf(ext)) {
+            case PDF, IMAGE, TEXT -> true;
+            case OFFICE -> doc.getPreviewPath() != null;
+            case UNSUPPORTED -> false;
+        };
     }
 
     /**
@@ -170,7 +206,9 @@ public class KnowledgeAnswerService {
         //    这两件事是同一个模式——检索命中的是"入口"，喂给模型前要把"本体"补全。
         List<KnowledgeRetriever.Hit> expanded = expandTables(expandSiblings(evidence));
 
-        String answer = generate(question, expanded);
+        // 角标写法归一化（【1】/［1］/<1> → [1]）。放在这里而不是渲染层：
+        // 自评、飞轮记录的都该是同一份正文，不能各处看到不同形态的角标。
+        String answer = CitationSanitizer.normalize(generate(question, expanded));
         if (answer == null || answer.isBlank()) {
             flywheelService.record(FlywheelService.SOURCE_WEAK_EVIDENCE,
                     conversationId, question, null, gate.topScore());
@@ -195,7 +233,7 @@ public class KnowledgeAnswerService {
         }
 
         return new Answer(true, answer, gate.topScore(), gate.evidenceCount(), gate.reason(),
-                toSources(expanded));
+                toSources(expanded, loadDocs(expanded)));
     }
 
     private static String abbreviate(String s) {
@@ -277,6 +315,20 @@ public class KnowledgeAnswerService {
             }
         }
         return sb.toString().trim();
+    }
+
+    /** 一次把命中的文档捞出来，供溯源项判断"有没有原件可看"。 */
+    private Map<Long, AiKnowledgeDoc> loadDocs(List<KnowledgeRetriever.Hit> hits) {
+        List<Long> ids = hits.stream()
+                .map(KnowledgeRetriever.Hit::docId)
+                .filter(Objects::nonNull)
+                .distinct()
+                .toList();
+        if (ids.isEmpty()) {
+            return Map.of();
+        }
+        return docMapper.selectBatchIds(ids).stream()
+                .collect(Collectors.toMap(AiKnowledgeDoc::getId, d -> d));
     }
 
     /**
