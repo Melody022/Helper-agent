@@ -187,11 +187,24 @@ rag:
   # 证据闸：资料不够就不让模型开口
   evidence-gate:
     enabled: ${RAG_EVIDENCE_GATE_ENABLED:true}
-    # 最相关那条的相关性门槛（ES 的 cosine 得分，0~1）。
-    # 注意：这个值必须用评估集校准，拍脑袋设高了会把能答的问题也拒掉
+    # 主判据是下面 rerank-score。这个向量相似度门槛只在**精排不可用时**兜底——
+    # 实测它分不开"能答"和"不能答"（两类分数区间几乎完全重叠），
+    # 所以不要指望调它能解决问题，它只是保证精排挂了也不至于全放行。
     min-retrieval-score: ${RAG_MIN_RETRIEVAL_SCORE:0.6}
-    # 至少要有几条资料达到上面的门槛
-    min-evidence-count: ${RAG_MIN_EVIDENCE_COUNT:1}
+    # 精排分门槛。由 RetrievalEvalTest 在标注集上校准：
+    # 24 条有答案的样本中位 0.837，10 条无答案的最高 0.190。
+    # 取 0.19 时无答案的全部被拦下（漏放 0），代价是 13% 能答的问题被误拦（转人工）。
+    # 这是偏保守的刻意取舍——误拦只是多转一次人工，漏放是直接给出编造的答案。
+    min-rerank-score: ${RAG_MIN_RERANK_SCORE:0.19}
+
+  # 精排（rerank）：交叉编码器给"问题+资料"成对打分，是证据闸的主判据
+  rerank:
+    enabled: ${RAG_RERANK_ENABLED:true}
+    model: ${RAG_RERANK_MODEL:gte-rerank-v2}
+    # 走 DashScope 原生接口（不是 embedding 那个 compatible-mode 前缀），复用同一个 key
+    base-url: ${RAG_RERANK_BASE_URL:https://dashscope.aliyuncs.com}
+    api-key: ${DASHSCOPE_API_KEY:}
+    max-documents: ${RAG_RERANK_MAX_DOCUMENTS:20}
 
   # 生成后自评：答案有没有超出资料。用本地小模型，判不出来时放行
   self-eval:

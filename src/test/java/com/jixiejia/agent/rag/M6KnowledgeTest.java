@@ -10,7 +10,6 @@ import com.jixiejia.agent.persistence.mapper.ai.AiKnowledgeDocMapper;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.BeforeEach;
-import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -83,33 +82,63 @@ class M6KnowledgeTest {
     void cleanUp() throws Exception {
         // 测试会往 MySQL 与 ES 两边写，两边都要清，否则知识库里会积攒测试数据、
         // 甚至影响后续检索结果。
+        //
+        // ⚠️ 顺序很关键：必须**先**从 MySQL 读出 docId、**再**删。反过来先物理删了 MySQL，
+        // 下面这个 selectList 就什么都查不到，循环体一次都不执行——ES 里的测试文档
+        // 一条都清不掉，还能被检索到、挤掉正确答案。（修复前正是这个顺序，
+        // 索引里积了十几条孤儿 [测试] 文档。）
         List<AiKnowledgeDoc> docs = docMapper.selectList(Wrappers.<AiKnowledgeDoc>lambdaQuery()
                 .likeRight(AiKnowledgeDoc::getSourceId, TEST_SOURCE_PREFIX));
         for (AiKnowledgeDoc doc : docs) {
             chunkMapper.delete(Wrappers.<com.jixiejia.agent.persistence.entity.ai.AiKnowledgeChunk>
                     lambdaQuery().eq(com.jixiejia.agent.persistence.entity.ai.AiKnowledgeChunk::getDocId, doc.getId()));
-            if (knowledgeIndex.available()) {
-                es.deleteByQuery(d -> d.index(KnowledgeIndex.NAME)
-                        .query(q -> q.term(t -> t.field(KnowledgeIndex.fieldDocId()).value(doc.getId()))));
-            }
         }
-        // 这里必须物理删除。用 docMapper.deleteById 走的是 @TableLogic 逻辑删除，
+        if (knowledgeIndex.available()) {
+            es.deleteByQuery(d -> d.index(KnowledgeIndex.NAME)
+                    .query(q -> q.terms(t -> t.field(KnowledgeIndex.fieldDocId())
+                            .terms(v -> v.value(docs.stream()
+                                    .map(doc -> co.elastic.clients.elasticsearch._types.FieldValue
+                                            .of(doc.getId()))
+                                    .toList())))));
+            // delete_by_query 是近实时的：不立刻 refresh 的话，最后一条测试留下的文档
+            // 可能还没提交完就被下一轮（或下一次评估）读到。实测跑完整个测试套件后，
+            // 索引里就是会残留最后一条，所以这里显式刷一次。
+            es.indices().refresh(r -> r.index(KnowledgeIndex.NAME));
+        }
+        // 物理删除。用 docMapper.deleteById 走的是 @TableLogic 逻辑删除，
         // 只把 del_flag 置成 '2'，行还留在表里；而上面的 selectList 会自动过滤掉它们，
         // 于是下一轮清理根本看不见这些残行——越积越多，还会污染检索结果。
         // （ai_user 那边踩过一模一样的坑，这里忘了改。）
         jdbcTemplate.update("DELETE FROM ai_knowledge_doc WHERE LEFT(source_id, 5) = 'test-'");
         jdbcTemplate.update("DELETE FROM ai_knowledge_chunk WHERE doc_id NOT IN (SELECT id FROM ai_knowledge_doc)");
 
+        // 最后再对一次账：把 ES 里"MySQL 已经没有对应文档"的切片全部清掉。
+        //
+        // 为什么不靠上面那条按 docId 的 deleteByQuery 收尾就够了：实测即使显式 refresh，
+        // 偶尔仍会漏下最后一条（入库与清理在异步线程池里交错）。而漏下的切片会真的
+        // 挤掉检索结果，不能当小事。对账走的是与线上同一套逻辑，顺便也把这段代码
+        // 覆盖到了——比再加一层 sleep 靠谱。
+        if (knowledgeIndex.available()) {
+            ingestionService.reconcileIndex();
+        }
+
         flywheelMapper.delete(Wrappers.<AiFlywheelCandidate>lambdaQuery()
                 .likeRight(AiFlywheelCandidate::getQuestion, "[测试]"));
     }
 
-    // ---------------- 纯逻辑：证据闸 ----------------
+    // ---------------- 纯逻辑：证据闸（精排不可用时退回向量判据） ----------------
 
+    /**
+     * 这一组测的是<b>兜底路径</b>：精排不可用时退回向量判据的行为。
+     *
+     * <p>精排那条主路径需要真实调用外部接口，放在
+     * {@link com.jixiejia.agent.eval.RetrievalEvalTest} 里对着标注集评估——
+     * 在那里能算出误拦率/漏放率，在这里单测一条断言不了什么。
+     */
     @Test
     @DisplayName("证据闸：没有资料就拦下")
     void gateBlocksWhenNoEvidence() {
-        EvidenceGate.Verdict verdict = evidenceGate.evaluate(List.of(), true);
+        EvidenceGate.Verdict verdict = evidenceGate.evaluate("随便问问", List.of(), true);
 
         assertThat(verdict.passed()).isFalse();
         assertThat(verdict.reason()).contains("没有检索到任何资料");
@@ -117,36 +146,66 @@ class M6KnowledgeTest {
     }
 
     @Test
-    @DisplayName("证据闸：资料不相关就拦下（防止矮子里拔将军）")
+    @DisplayName("证据闸：精排关掉时退回向量判据——向量分太低就拦下")
     void gateBlocksWeakEvidence() {
-        EvidenceGate.Verdict verdict = evidenceGate.evaluate(List.of(hit(0.2)), true);
+        // 显式构造一个"精排不可用"的闸，测兜底路径。
+        // 用 Spring 注入的那个测不了：它带真实精排，走的是主判据那条分支。
+        EvidenceGate fallbackGate = new EvidenceGate((q, docs) -> null, 0.6, 0.19, true);
+
+        EvidenceGate.Verdict verdict = fallbackGate.evaluate("随便问问", List.of(hit(0.2)), true);
 
         assertThat(verdict.passed()).isFalse();
-        assertThat(verdict.reason()).contains("相关度也不足");
+        assertThat(verdict.rerankScore()).isNegative();
+        assertThat(verdict.reason()).contains("精排不可用");
     }
 
     @Test
-    @DisplayName("证据闸：达标条数不够也拦下（门槛设为 2 时才有实际约束）")
-    void gateBlocksWhenTooFewEvidence() {
-        // 两条里只有一条达标，而门槛要求 2 条
-        EvidenceGate strictGate = new EvidenceGate(0.6, 2);
-        EvidenceGate.Verdict verdict = strictGate.evaluate(List.of(hit(0.9), hit(0.3)), true);
+    @DisplayName("证据闸：精排分压过向量分——向量很高但精排很低时也必须拦下")
+    void gateBlocksWhenRerankSaysIrrelevant() {
+        // 这正是原实现漏放的那类问题：向量相似度看着挺高，其实没有一条资料回答了它
+        EvidenceGate gate = new EvidenceGate(rerankReturning(0.05), 0.6, 0.19, true);
+
+        EvidenceGate.Verdict verdict = gate.evaluate("平台的火箭发射服务怎么预约",
+                List.of(hit(0.77)), true);
 
         assertThat(verdict.passed()).isFalse();
-        assertThat(verdict.reason()).contains("达标资料条数不足");
-        assertThat(verdict.evidenceCount()).isEqualTo(1);
+        assertThat(verdict.rerankScore()).isEqualTo(0.05);
+        assertThat(verdict.reason()).contains("精排判定没有可用资料");
     }
 
     @Test
-    @DisplayName("证据闸：资料够相关就放行，关掉开关时一律放行")
-    void gatePassesWithGoodEvidence() {
-        EvidenceGate.Verdict verdict = evidenceGate.evaluate(List.of(hit(0.85)), true);
+    @DisplayName("证据闸：精排分够高就放行，哪怕向量分不高")
+    void gatePassesOnRerankScore() {
+        EvidenceGate gate = new EvidenceGate(rerankReturning(0.55), 0.6, 0.19, true);
+
+        EvidenceGate.Verdict verdict = gate.evaluate("押金怎么退", List.of(hit(0.5)), true);
 
         assertThat(verdict.passed()).isTrue();
-        assertThat(verdict.evidenceCount()).isPositive();
+        assertThat(verdict.rerankScore()).isEqualTo(0.55);
+    }
 
-        // 关掉闸门时即便没有资料也放行（用于做对照评估）
-        assertThat(evidenceGate.evaluate(List.of(), false).passed()).isTrue();
+    @Test
+    @DisplayName("证据闸：精排拿不到分时退回向量判据，而不是直接拒答")
+    void gateFallsBackWhenRerankUnavailable() {
+        // 返回 null 代表"这次没拿到精排分"（超时/限流/没配 key）
+        EvidenceGate gate = new EvidenceGate((q, docs) -> null, 0.6, 0.19, true);
+
+        EvidenceGate.Verdict verdict = gate.evaluate("押金怎么退", List.of(hit(0.85)), true);
+
+        assertThat(verdict.passed()).as("精排挂了不该让知识问答整条不可用").isTrue();
+        assertThat(verdict.rerankScore()).isNegative();
+        assertThat(verdict.reason()).contains("精排不可用");
+    }
+
+    @Test
+    @DisplayName("证据闸：关掉开关时一律放行")
+    void gateDisabledPassesEverything() {
+        assertThat(evidenceGate.evaluate("随便问问", List.of(), false).passed()).isTrue();
+    }
+
+    /** 构造一个固定返回某个精排分的打分器，用来隔离测试证据闸的判定逻辑。 */
+    private static com.jixiejia.agent.rag.RerankFunction rerankReturning(double score) {
+        return (query, documents) -> documents.stream().map(d -> score).toList();
     }
 
     private static KnowledgeRetriever.Hit hit(double vectorScore) {
@@ -275,18 +334,17 @@ class M6KnowledgeTest {
      */
 
     /**
-     * ⚠️ 当前<b>已知会失败</b>，原因是证据闸阈值没校准，不是这条用例写错了。
+     * ⚠️ 这条用例曾经因为证据闸阈值形同虚设而 {@code @Disabled}：
+     * 知识库有内容之后，一个完全不相关的问题（"平台的火箭发射服务怎么预约"）
+     * 向量相关度能拿到 0.7655，远超当时默认的 0.6，闸直接放行。
      *
-     * <p>实测：知识库有内容之后，一个完全不相关的问题（"平台的火箭发射服务怎么预约"）
-     * 向量相关度能拿到 <b>0.7655</b>，远高于 {@code min-retrieval-score} 默认的 0.6，
-     * 于是证据闸直接放行。真正把它拦下来的是第二道自评——而自评时灵时不灵，
-     * 所以这里的结果不稳定。
+     * <p>现在闸的主判据换成了精排分（见 {@link EvidenceGate}），这个问题在精排下只有
+     * 0.16 左右，会被稳定拦下，不再依赖时灵时不灵的自评。
      *
-     * <p>结论：<b>0.6 这个阈值是拍的，形同虚设</b>。修法是用评估集画出
-     * "阈值 vs 误拦率/漏放率"曲线重新选点，见 {@code docs/待办-评测与量化.md}。
-     * 校准之前先跳过，避免用一个不稳定的用例掩盖真正的问题。
+     * <p>这也是这条用例能重新启用的意义：它验证的是"闸真的拦得住"，
+     * 而不是"自评这次碰巧判对了"。所以它<b>必须走真实的精排链路</b>，
+     * 不能把这个类配成 {@code rag.rerank.enabled=false}——那样测的就成了兜底路径。
      */
-    @Disabled("证据闸阈值待校准：不相关问题的相关度能到 0.77，超过默认门槛 0.6")
     @Test
     @DisplayName("兜底：知识库里没有的内容必须拒绝作答，并记进飞轮")
     void refusesAndRecordsWhenKnowledgeMissing() {

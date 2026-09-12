@@ -87,7 +87,7 @@ public class KnowledgeAnswerService {
         List<KnowledgeRetriever.Hit> hits = retriever.retrieve(question, topK);
 
         // ② 证据闸：资料不够就不生成
-        EvidenceGate.Verdict gate = evidenceGate.evaluate(hits, gateEnabled);
+        EvidenceGate.Verdict gate = evidenceGate.evaluate(question, hits, gateEnabled);
         if (!gate.passed()) {
             log.info("证据闸拦下：{}（{}）", question, gate.reason());
             flywheelService.record(FlywheelService.SOURCE_WEAK_EVIDENCE,
