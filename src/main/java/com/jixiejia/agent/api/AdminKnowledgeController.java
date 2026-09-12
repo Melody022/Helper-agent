@@ -9,6 +9,7 @@ import com.jixiejia.agent.persistence.entity.ai.AiFlywheelCandidate;
 import com.jixiejia.agent.persistence.entity.ai.AiKnowledgeDoc;
 import com.jixiejia.agent.persistence.mapper.ai.AiFlywheelCandidateMapper;
 import com.jixiejia.agent.persistence.mapper.ai.AiKnowledgeDocMapper;
+import com.jixiejia.agent.rag.KnowledgeFileStore;
 import com.jixiejia.agent.rag.KnowledgeIndex;
 import com.jixiejia.agent.rag.KnowledgeIngestionService;
 import com.jixiejia.agent.rag.TextChunker;
@@ -34,6 +35,7 @@ import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.multipart.MultipartFile;
 
 import java.time.LocalDateTime;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -55,6 +57,7 @@ public class AdminKnowledgeController {
     private final DocumentParser documentParser;
     private final AiFlywheelCandidateMapper flywheelMapper;
     private final AiKnowledgeDocMapper docMapper;
+    private final KnowledgeFileStore fileStore;
 
     @Operation(summary = "触发知识入库",
             description = "把平台已发布文章与内置规则语料增量灌入知识库，可反复执行")
@@ -103,6 +106,16 @@ public class AdminKnowledgeController {
         try {
             byte[] bytes = file.getBytes();
             String filename = file.getOriginalFilename();
+            String ext = DocumentParser.extensionOf(filename);
+
+            // sourceId 用内容指纹：同一份文件重复上传会被入库查重跳过，不会堆重复文档。
+            // 落盘文件名也用同一个指纹，于是"重复上传"连文件都不会堆第二份。
+            String sourceId = "upload-" + TextChunker.sha256(bytes).substring(0, 16);
+
+            // 先把原件落下来。解析要花多久是解析的事，"这份文件传过"这个事实先固化——
+            // 后面无论哪一步失败，原件都还在磁盘上，能拿来排查、也能重新入库。
+            String filePath = fileStore.store(sourceId, ext, bytes);
+
             ParsedDocument parsed = documentParser.parse(filename, bytes);
 
             if (parsed.text().isBlank() && parsed.tables().isEmpty()) {
@@ -111,15 +124,28 @@ public class AdminKnowledgeController {
                                 + (parsed.warnings().isEmpty() ? "" : "：" + String.join("；", parsed.warnings()))));
             }
 
-            // sourceId 用内容指纹：同一份文件重复上传会被入库查重跳过，不会堆重复文档
-            String sourceId = "upload-" + TextChunker.sha256(bytes).substring(0, 16);
             String docTitle = (title == null || title.isBlank()) ? parsed.title() : title.trim();
+            List<String> warnings = new ArrayList<>(parsed.warnings());
 
             int chunks = ingestionService.ingestUpload(sourceId, docTitle, parsed);
             if (chunks < 0) {
                 return ResponseEntity.ok(Map.of("code", 200, "message",
                         "这份文档内容和库里已有的完全一致，已跳过（没有重复入库）"));
             }
+
+            // 预览件：**只有 Office 需要**。PDF/图片/纯文本的原件浏览器本来就能直接显示，
+            // 没必要再存一份；docx/xlsx/pptx 渲染不了，不转就只能让用户下载。
+            // 转失败只影响"能不能跳回原件"，绝不能影响入库——所以这里不抛异常。
+            String previewPath = null;
+            if (KnowledgeFileStore.kindOf(ext) == KnowledgeFileStore.PreviewKind.OFFICE) {
+                previewPath = fileStore.convertOfficeToPdf(sourceId, filePath);
+                if (previewPath == null) {
+                    warnings.add("原件是 Office 文档，但 PDF 预览转换失败（可能没装 LibreOffice），"
+                            + "这份资料的角标将无法跳转原件");
+                }
+            }
+
+            writeFileFields(sourceId, filename, filePath, previewPath, bytes.length);
 
             Map<String, Object> body = new LinkedHashMap<>();
             body.put("code", 200);
@@ -129,7 +155,7 @@ public class AdminKnowledgeController {
             body.put("tables", parsed.tables().size());
             body.put("pageCount", parsed.pageCount());
             body.put("ocrPages", parsed.ocrPages());
-            body.put("warnings", parsed.warnings());
+            body.put("warnings", warnings);
             return ResponseEntity.ok(body);
 
         } catch (DocumentParseException e) {
@@ -141,6 +167,25 @@ public class AdminKnowledgeController {
             return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
                     .body(Map.of("code", 500, "message", "入库失败：" + e.getMessage()));
         }
+    }
+
+    /**
+     * 把原件信息写回文档记录。
+     *
+     * <p><b>这里必须用 UpdateWrapper 显式 set，不能用 {@code updateById}。</b>
+     * MyBatis-Plus 的 {@code updateById} 会**跳过 null 字段**，
+     * 于是"把 previewPath 清空"这种操作永远不生效——项目里已经踩过同一个坑
+     * （踩坑第 26/27 条，清理令牌时 {@code setXxx(null)} 清不掉）。
+     */
+    private void writeFileFields(String sourceId, String fileName, String filePath,
+                                 String previewPath, long size) {
+        docMapper.update(null, Wrappers.<AiKnowledgeDoc>lambdaUpdate()
+                .eq(AiKnowledgeDoc::getDocType, "upload")
+                .eq(AiKnowledgeDoc::getSourceId, sourceId)
+                .set(AiKnowledgeDoc::getFileName, fileName)
+                .set(AiKnowledgeDoc::getFilePath, filePath)
+                .set(AiKnowledgeDoc::getPreviewPath, previewPath)
+                .set(AiKnowledgeDoc::getFileSize, size));
     }
 
     @Operation(summary = "已入库文档列表", description = "走 MySQL 查询（ES 索引里没存 docType，过滤不了来源）")
