@@ -10,6 +10,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 
 /**
  * 第 1 层：关键词加权分类。
@@ -173,7 +174,46 @@ public class KeywordWeightClassifier {
             return Optional.empty();
         }
 
-        if (top.getValue() >= highWeight && top.getValue() > runnerUp) {
+        // ⚠️ 定案还要加一条：**别的域也在说话时不许抢答**。
+        //
+        // 跨域的定义就是"一句话里有两个域"。如果除了我之外还有别的域命中了词
+        // （哪怕只是弱词），那就说明这句话可能不止一个目标——用单个域的强词定案，
+        // 等于把模型挡在门外，它连看一眼的机会都没有。
+        //
+        // 评估集实测：4 条跨域样本，**过的那 3 条都是靠"两个高权重词同分→下沉给模型"**
+        // （踩坑第 16 条说的那个"保护"），不是靠跨域判定本身；
+        // 漏的那条恰恰是"只有一个域命中强词"：
+        //   "有没有20吨挖机、附近能租吗、流程是啥" —— KNOWLEDGE("流程" 0.9)
+        //   加上 CHUZU("租" 0.7)，关键词层直接定案成知识问答，模型根本没轮到。
+        //
+        // 代价照实说：会有更多句子下沉到模型（多一次**本地**小模型调用）。
+        // 换来的是"可能跨域就不抢答"。
+        // 别的域是否也在说话（判断见下面）
+        //
+        // ⚠️ "别的域"只算**业务域**——就是 CROSS_DOMAIN 自己声明的那几个
+        // （设备/出租/求租/需求/资讯）。知识、发布、投诉、闲聊**不参与跨域**，
+        // 否则"这个平台怎么投诉"会因为命中了知识意图的弱词"平台怎么"被挡下来，
+        // 投诉的快速通道就没了（实测踩到：这条规则第一版就是这么错的）。
+        Set<String> crossDomainCaps = Intent.CROSS_DOMAIN.capabilities();
+        List<String> topHits = scored.hits().getOrDefault(top.getKey(), List.of());
+        boolean otherDomainSpeaking = scored.ranked().stream()
+                .skip(1)
+                .filter(e -> e.getKey() != Intent.UNKNOWN && e.getKey() != Intent.CROSS_DOMAIN)
+                .filter(e -> e.getKey().capabilities().stream().anyMatch(crossDomainCaps::contains))
+                .anyMatch(e -> {
+                    List<String> hits = scored.hits().getOrDefault(e.getKey(), List.of());
+                    // ⚠️ 它的命中词如果**全都落在我的命中词内部**，那是**同一处文本**
+                    // 被两个词表各认了一次，不是用户问了两件事。
+                    //
+                    // 最典型的："求租"里含"租"，而"租"是出租查询的弱词——
+                    // 不排掉的话，每一句带"求租"的话都会被判成"两个域在说话"，
+                    // 求租意图的快速通道会被整个堵死（实测：这条漏了，路由测试直接红）。
+                    boolean sameMention = !hits.isEmpty()
+                            && hits.stream().allMatch(h -> topHits.stream().anyMatch(t -> t.contains(h)));
+                    return !sameMention;
+                });
+
+        if (top.getValue() >= highWeight && top.getValue() > runnerUp && !otherDomainSpeaking) {
             log.debug("关键词层定案：{} 命中 [{}]", top.getKey(), hitText);
             return Optional.of(IntentResult.of(top.getKey(), top.getValue(),
                     ClassifyLayer.KEYWORD, "命中关键词：" + hitText));
