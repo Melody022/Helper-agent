@@ -20,6 +20,10 @@ import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.core.io.FileSystemResource;
+import org.springframework.core.io.Resource;
+import org.springframework.http.ContentDisposition;
+import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
@@ -34,6 +38,7 @@ import org.springframework.web.bind.annotation.RequestPart;
 import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.multipart.MultipartFile;
 
+import java.nio.charset.StandardCharsets;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -238,6 +243,38 @@ public class AdminKnowledgeController {
             log.error("删除文档失败：{}", id, e);
             return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
                     .body(Map.of("code", 500, "message", "删除失败：" + e.getMessage()));
+        }
+    }
+
+    @Operation(summary = "下载原件",
+            description = "给的是**原始文件**（比如 docx），不是预览用的 PDF。只有 ADMIN 能拿到——"
+                    + "知识库里的文档常有版权或内部属性，聊天页只做预览不做下载")
+    @GetMapping("/docs/{id}/file")
+    public ResponseEntity<?> downloadFile(@PathVariable Long id) {
+        AiKnowledgeDoc doc = docMapper.selectById(id);
+        if (doc == null || doc.getFilePath() == null || doc.getFilePath().isBlank()) {
+            return ResponseEntity.status(HttpStatus.NOT_FOUND)
+                    .body(Map.of("code", 404, "message", "这份资料没有原件可下载：" + id));
+        }
+
+        try {
+            Resource resource = new FileSystemResource(fileStore.resolve(doc.getFilePath()));
+            if (!resource.exists()) {
+                return ResponseEntity.status(HttpStatus.NOT_FOUND)
+                        .body(Map.of("code", 404, "message", "原件文件不在磁盘上了"));
+            }
+            String name = (doc.getFileName() == null || doc.getFileName().isBlank())
+                    ? "knowledge-" + id : doc.getFileName();
+            return ResponseEntity.ok()
+                    .contentType(MediaType.APPLICATION_OCTET_STREAM)
+                    .header(HttpHeaders.CONTENT_DISPOSITION,
+                            ContentDisposition.attachment()
+                                    .filename(name, StandardCharsets.UTF_8).build().toString())
+                    .body(resource);
+        } catch (Exception e) {
+            log.error("下载原件失败：{}", id, e);
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
+                    .body(Map.of("code", 500, "message", "下载失败：" + e.getMessage()));
         }
     }
 
