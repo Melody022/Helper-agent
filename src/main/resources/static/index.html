@@ -237,6 +237,97 @@
         }
 
         footer button:disabled { background: #ccc; cursor: not-allowed; }
+        /* 引用角标：点开能跳到原件那一页 */
+        .cite {
+            color: #2563eb;
+            cursor: pointer;
+            font-size: 0.75em;
+            vertical-align: super;
+            padding: 0 1px;
+            user-select: none;
+        }
+
+        .cite:hover { text-decoration: underline; }
+
+        /* 原件预览弹层 */
+        .modal {
+            position: fixed;
+            inset: 0;
+            background: rgba(0, 0, 0, .45);
+            display: none;
+            z-index: 50;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .modal.open { display: flex; }
+
+        .modal-box {
+            background: #fff;
+            width: min(940px, 94vw);
+            max-height: 92vh;
+            border-radius: 10px;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }
+
+        .modal-head {
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+            gap: 12px;
+            padding: 12px 16px;
+            border-bottom: 1px solid #e5e7eb;
+        }
+
+        .modal-title { font-weight: 600; }
+        .modal-where { color: #6b7280; font-size: 13px; margin-top: 2px; }
+
+        .modal-close {
+            border: 0;
+            background: transparent;
+            font-size: 22px;
+            line-height: 1;
+            cursor: pointer;
+            color: #6b7280;
+        }
+
+        .modal-body {
+            flex: 1;
+            overflow: auto;
+            padding: 12px 16px;
+            background: #f9fafb;
+            display: flex;
+            justify-content: center;
+        }
+
+        .modal-body canvas { max-width: 100%; box-shadow: 0 1px 6px rgba(0, 0, 0, .15); background: #fff; }
+        .modal-body img { max-width: 100%; }
+        .modal-body .raw {
+            white-space: pre-wrap;
+            word-break: break-word;
+            font-family: ui-monospace, Consolas, monospace;
+            font-size: 13px;
+            background: #fff;
+            padding: 14px;
+            border-radius: 8px;
+            width: 100%;
+            margin: 0;
+        }
+
+        .modal-body .placeholder { color: #6b7280; padding: 40px 0; text-align: center; }
+
+        .modal-foot {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            padding: 10px 16px;
+            border-top: 1px solid #e5e7eb;
+            font-size: 14px;
+        }
+
+        .modal-foot button:disabled { opacity: .4; cursor: default; }
     </style>
 </head>
 <body>
@@ -276,6 +367,27 @@
         <input id="input" placeholder="说点什么…（回车发送）" autocomplete="off">
         <button id="sendBtn">发送</button>
     </footer>
+</div>
+
+<!-- 原件预览弹层。必须放在下方脚本**之前**：脚本解析到这里时就会去绑
+     srcClose/srcPrev 这些按钮的事件，那时它们还不存在就会报 null。 -->
+<div class="modal" id="srcModal">
+    <div class="modal-box">
+        <div class="modal-head">
+            <div>
+                <div class="modal-title" id="srcTitle"></div>
+                <div class="modal-where" id="srcWhere"></div>
+            </div>
+            <button class="modal-close" id="srcClose" type="button">×</button>
+        </div>
+        <div class="modal-body" id="srcBody"></div>
+        <div class="modal-foot">
+            <button id="srcPrev" type="button">‹ 上一页</button>
+            <span id="srcPage"></span>
+            <button id="srcNext" type="button">下一页 ›</button>
+            <span id="srcAdmin"></span>
+        </div>
+    </div>
 </div>
 
 <script>
@@ -404,7 +516,19 @@
 
         const b = document.createElement('div');
         b.className = 'bubble';
-        b.textContent = text;
+        // ⚠️ 顺序不能反：**先转义、再替换角标**。
+        // 知识库内容是**用户上传的文档**，里面完全可能有尖括号甚至 script 标签；
+        // 先替换再转义，就等于把上传内容当 HTML 执行了。
+        if (meta && meta.sources && meta.sources.length) {
+            b.innerHTML = renderCitations(esc(text), meta.sources);
+            b.querySelectorAll('.cite').forEach(function (el) {
+                el.addEventListener('click', function () {
+                    openSource(meta.sources[parseInt(el.dataset.i, 10) - 1]);
+                });
+            });
+        } else {
+            b.textContent = text;
+        }
         wrap.appendChild(b);
 
         // 把路由结果显示出来：演示时能直观看到"这句话被交给了谁"
@@ -493,6 +617,159 @@
     };
 
     $('username').focus();
+    // ---------- 引用角标与原件预览 ----------
+
+    /**
+     * 把答案正文里的引用编号做成可点角标。
+     *
+     * ⚠️ 传进来的必须是**已经转义过**的文本。顺序不能反：知识库内容是
+     * 用户上传的文档，里面完全可能有尖括号甚至 script 标签。
+     */
+    function renderCitations(escaped, sources) {
+        if (!sources || !sources.length) return escaped;
+        return escaped.replace(/\[(\d{1,3})\]/g, function (m, n) {
+            const i = parseInt(n, 10);
+            // 越界编号留成纯文本。宁可少一个角标，也不能让用户点开一份**错的原件**——
+            // 那比没有链接更伤信任。（这条规则的服务端权威表述在 CitationSanitizer.isValid）
+            if (i < 1 || i > sources.length) return m;
+            return '<sup class="cite" data-i="' + i + '">[' + i + ']</sup>';
+        });
+    }
+
+    /** 当前登录账号是不是管理员。"下载原件"入口只对管理员显示。 */
+    function isAdmin() {
+        return !!(state.user && state.user.roles && state.user.roles.indexOf('ADMIN') >= 0);
+    }
+
+    // PDF 文档对象与当前页，翻页时复用（重新 getDocument 要重解析一遍）
+    let pdfDoc = null;
+    let pdfPage = 1;
+
+    function closeModal() {
+        $('srcModal').classList.remove('open');
+        $('srcBody').innerHTML = '';
+        pdfDoc = null;
+    }
+
+    function placeholder(text) {
+        $('srcBody').innerHTML = '<div class="placeholder">' + esc(text) + '</div>';
+    }
+
+    /**
+     * 打开某条依据的原件。
+     *
+     * 原件的取法：**用 fetch 带令牌拿字节，再喂给渲染器**——
+     * 不能把接口 URL 直接塞进 iframe src（那样带不了 Authorization 头，会被 401），
+     * 也不会给用户一个可以另存、可以转发的直链。
+     */
+    async function openSource(s) {
+        if (!s) return;
+
+        $('srcModal').classList.add('open');
+        $('srcTitle').textContent = s.title || '(无标题)';
+        const where = [s.sectionPath, s.pageNo ? ('第 ' + s.pageNo + ' 页') : null]
+            .filter(Boolean).join(' · ');
+        $('srcWhere').textContent = where || '这条依据没有章节与页码信息';
+
+        // "在管理台打开原件"只在 ADMIN 登录时出现
+        $('srcAdmin').innerHTML = isAdmin()
+            ? '<a href="/api/admin/knowledge/docs/' + s.docId + '/file" style="margin-left:auto">下载原件（管理台）</a>'
+            : '';
+
+        pdfDoc = null;
+        pdfPage = s.pageNo || 1;
+        setPager(0, 0);
+
+        if (!s.previewable) {
+            placeholder('这份原件没有可预览的版本（格式不支持，或 Office 转换未成功）。'
+                + (isAdmin() ? '可以用下方"下载原件"取原件。' : ''));
+            return;
+        }
+
+        placeholder('正在取原件…');
+        try {
+            const res = await fetch('/api/knowledge/files/' + s.docId + '/preview', {
+                headers: { 'Authorization': 'Bearer ' + state.token }
+            });
+            if (!res.ok) {
+                placeholder('取原件失败：HTTP ' + res.status);
+                return;
+            }
+            const blob = await res.blob();
+            const type = (res.headers.get('Content-Type') || blob.type || '').split(';')[0];
+
+            if (type === 'application/pdf') {
+                await renderPdf(blob, pdfPage);
+            } else if (type.indexOf('image/') === 0) {
+                renderImage(blob);
+            } else {
+                renderText(blob);
+            }
+        } catch (e) {
+            placeholder('取原件出错：' + e.message);
+        }
+    }
+
+    function setPager(current, total) {
+        $('srcPage').textContent = total ? ('第 ' + current + ' 页 / 共 ' + total + ' 页') : '';
+        $('srcPrev').disabled = !total || current <= 1;
+        $('srcNext').disabled = !total || current >= total;
+    }
+
+    async function renderPdf(blob, pageNo) {
+        // 动态 import：这两个文件是 ES module，不想为此把整个页面改成 module
+        const pdfjsLib = await import('/vendor/pdfjs/pdf.min.mjs');
+        pdfjsLib.GlobalWorkerOptions.workerSrc = '/vendor/pdfjs/pdf.worker.min.mjs';
+
+        pdfDoc = await pdfjsLib.getDocument({ data: await blob.arrayBuffer() }).promise;
+        await drawPage(Math.min(Math.max(1, pageNo), pdfDoc.numPages));
+    }
+
+    async function drawPage(pageNo) {
+        if (!pdfDoc) return;
+        const page = await pdfDoc.getPage(pageNo);
+        const viewport = page.getViewport({ scale: 1.4 });
+
+        const canvas = document.createElement('canvas');
+        canvas.width = viewport.width;
+        canvas.height = viewport.height;
+        $('srcBody').innerHTML = '';
+        $('srcBody').appendChild(canvas);
+
+        await page.render({ canvasContext: canvas.getContext('2d'), viewport }).promise;
+        pdfPage = pageNo;
+        setPager(pageNo, pdfDoc.numPages);
+    }
+
+    function renderImage(blob) {
+        const img = document.createElement('img');
+        img.src = URL.createObjectURL(blob);
+        img.onload = function () { URL.revokeObjectURL(img.src); };
+        $('srcBody').innerHTML = '';
+        $('srcBody').appendChild(img);
+        setPager(0, 0);
+    }
+
+    async function renderText(blob) {
+        const pre = document.createElement('pre');
+        pre.className = 'raw';
+        pre.textContent = await blob.text();
+        $('srcBody').innerHTML = '';
+        $('srcBody').appendChild(pre);
+        setPager(0, 0);
+    }
+
+    $('srcClose').addEventListener('click', closeModal);
+    $('srcPrev').addEventListener('click', function () { if (pdfPage > 1) drawPage(pdfPage - 1); });
+    $('srcNext').addEventListener('click', function () {
+        if (pdfDoc && pdfPage < pdfDoc.numPages) drawPage(pdfPage + 1);
+    });
+    $('srcModal').addEventListener('click', function (e) {
+        if (e.target === $('srcModal')) closeModal();
+    });
+    document.addEventListener('keydown', function (e) {
+        if (e.key === 'Escape') closeModal();
+    });
 </script>
 </body>
 </html>
