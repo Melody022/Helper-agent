@@ -50,8 +50,18 @@ import java.util.Map;
 @RequiredArgsConstructor
 public class KnowledgeIngestionService {
 
-    /** 每批算多少个切片的向量。太大容易触发接口的批量上限，太小浪费往返。 */
-    private static final int EMBED_BATCH = 16;
+    /**
+     * 每批算多少个切片的向量。
+     *
+     * <p><b>10 是硬上限，不能再调大。</b>DashScope 的 embedding 接口单次请求最多接受
+     * 10 条文本，超了直接 400：{@code batch size is invalid, it should not be larger than 10}。
+     *
+     * <p>这个坑潜伏了很久才暴露：以前入库的都是零散短文本（内置规则每条 1~2 个切片），
+     * 从来凑不满一批；直到 M9 支持上传整份文档，一个几百字的文档就有几十个切片，
+     * 第一批就把接口打爆了——而且失败后文档停留在 PARSED 状态、一条切片都没有，
+     * 从界面上只看到"上传转了半天然后没了"。
+     */
+    private static final int EMBED_BATCH = 10;
 
     /** 内置平台规则语料的位置 */
     private static final String BUILTIN_FAQ_PATH = "classpath:knowledge/platform-faq.md";
@@ -208,7 +218,16 @@ public class KnowledgeIngestionService {
         if (doc == null) {
             return -1;
         }
-        return indexDocument(doc, parsed.text(), parsed.tables());
+        try {
+            return indexDocument(doc, parsed.text(), parsed.tables());
+        } catch (Exception e) {
+            // 把失败写进文档记录。否则文档会停在 PARSED、切片为 0，
+            // 从管理页只看得出"没成功"，看不出为什么——实测就是这么排查了半天。
+            doc.setStatus("FAILED");
+            doc.setErrorMsg(truncate("入库失败：" + e.getMessage()));
+            docMapper.updateById(doc);
+            throw e;
+        }
     }
 
     /**

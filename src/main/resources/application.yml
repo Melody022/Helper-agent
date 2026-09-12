@@ -234,6 +234,8 @@ rag:
       coverage-threshold: ${RAG_OCR_COVERAGE_THRESHOLD:0.02}
       # 单次上传最多 OCR 多少页。多模态按量计费，必须有上限兜住最坏情况
       max-pages: ${RAG_OCR_MAX_PAGES:50}
+      # OCR 并发度。各页互相独立，串行纯属浪费等待时间（实测 21 页串行近 6 分钟）
+      concurrency: ${RAG_OCR_CONCURRENCY:4}
       # 截图 DPI。太高会让图片 token 暴涨
       dpi: ${RAG_OCR_DPI:200}
       model: ${RAG_OCR_MODEL:qwen-vl-max}

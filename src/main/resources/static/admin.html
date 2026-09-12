@@ -294,8 +294,9 @@ function renderUpload(p) {
         <h2>上传文档</h2>
         <p class="hint">
             支持 PDF、Word、Excel、PPT、图片、md / txt / csv。<br>
-            PDF 与 Office 走本地解析（快、免费）；<strong>扫描件才会调用多模态 OCR</strong>（慢，按量计费），
-            单次最多 <span id="ocrCap">50</span> 页。
+            <strong>电子版文档</strong>（有文字层）走本地解析，几秒到几十秒，免费。<br>
+            <strong>扫描件</strong>每一页都要单独调一次多模态 OCR，<strong>每页约 10~20 秒</strong>——
+            一份 20 页的扫描件可能要几分钟，请耐心等待，页面会显示已用时间。
         </p>
         <div class="drop" id="drop">
             <strong>点击选择文件，或把文件拖到这里</strong>
@@ -331,8 +332,19 @@ function renderUpload(p) {
         const box = $('uploadResult');
         btn.disabled = true;
         btn.innerHTML = '<span class="spin"></span>解析中…';
-        box.className = 'result show ok';
-        box.textContent = '正在解析并入库，扫描件较多时可能要几十秒，请勿关闭页面…';
+
+        // 扫描件是分钟级的，不给计时的话用户只会觉得卡死了。
+        // 实测踩过：串行 OCR 一份 21 页扫描件要近 6 分钟，界面上只有一句静态的"解析中"。
+        const startedAt = Date.now();
+        let timer = null;
+        const tick = () => {
+            const sec = Math.round((Date.now() - startedAt) / 1000);
+            box.className = 'result show ok';
+            box.innerHTML = `正在解析并入库，已用 <strong>${sec}</strong> 秒…<br>`
+                + `<span style="color:var(--muted)">扫描件每页约 10~20 秒；电子版文档通常十几秒内完成。</span>`;
+        };
+        tick();
+        timer = setInterval(tick, 1000);
 
         const fd = new FormData();
         fd.append('file', state.file);
@@ -341,10 +353,12 @@ function renderUpload(p) {
 
         try {
             const r = await api('/api/admin/knowledge/upload', { method: 'POST', body: fd });
-            let html = `<strong>${r.message}</strong><br>`;
+            const sec = Math.round((Date.now() - startedAt) / 1000);
+            let html = `<strong>${r.message}</strong>（耗时 ${sec} 秒）<br>`;
             if (r.chunks != null) {
                 html += `标题：${r.title || '(无)'}　切片：${r.chunks}　表格：${r.tables ?? 0} 张　`
-                     +  `页数：${r.pageCount ?? '-'}　OCR：${r.ocrPages ?? 0} 页`;
+                     +  `页数：${r.pageCount ?? '-'}　`
+                     +  (r.ocrPages ? `<strong>OCR：${r.ocrPages} 页</strong>` : 'OCR：0 页');
             }
             if (r.warnings && r.warnings.length) {
                 html += '<ul>' + r.warnings.map(w => `<li>${w}</li>`).join('') + '</ul>';
@@ -358,6 +372,7 @@ function renderUpload(p) {
             box.className = 'result show err';
             box.textContent = '上传失败：' + e.message;
         } finally {
+            clearInterval(timer);
             btn.disabled = false;
             btn.textContent = '上传并入库';
         }
