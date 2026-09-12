@@ -1,6 +1,5 @@
 package com.jixiejia.agent.rag;
 
-import com.jixiejia.agent.persistence.entity.ai.AiKnowledgeDoc;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
@@ -43,28 +42,5 @@ class SourceCitationTest {
                 KnowledgeAnswerService.toSources(List.of(hit(7L)), Map.of());
 
         assertThat(sources.get(0).previewable()).isFalse();
-    }
-
-    @Test
-    @DisplayName("PDF / 图片 / 纯文本原件可直接预览")
-    void marksRenderableOriginalsPreviewable() {
-        assertThat(previewableOf("upload-a.pdf", null)).isTrue();
-        assertThat(previewableOf("upload-a.png", null)).isTrue();
-        assertThat(previewableOf("upload-a.txt", null)).isTrue();
-    }
-
-    @Test
-    @DisplayName("Office 原件要看转换是否成功，zip 之类一律不可预览")
-    void officeDependsOnConversion() {
-        assertThat(previewableOf("upload-a.docx", "upload-a.preview.pdf")).isTrue();
-        assertThat(previewableOf("upload-a.docx", null)).isFalse();
-        assertThat(previewableOf("upload-a.zip", null)).isFalse();
-    }
-
-    private static boolean previewableOf(String filePath, String previewPath) {
-        AiKnowledgeDoc doc = new AiKnowledgeDoc();
-        doc.setFilePath(filePath);
-        doc.setPreviewPath(previewPath);
-        return KnowledgeAnswerService.previewable(doc);
     }
 }

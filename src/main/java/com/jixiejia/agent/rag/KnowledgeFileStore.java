@@ -5,6 +5,8 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
+import com.jixiejia.agent.rag.parse.DocumentParser;
+
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -103,6 +105,29 @@ public class KnowledgeFileStore {
             return PreviewKind.OFFICE;
         }
         return PreviewKind.UNSUPPORTED;
+    }
+
+    /**
+     * 这份文档该交给浏览器展示的文件（相对路径）。
+     *
+     * <p><b>返回 null 就表示"没有可预览的形式"。</b>刻意返回路径而不是布尔值：
+     * "能不能预览"和"该取哪个文件"本来是**同一个决策**——拆成两半，
+     * 调用方就得把"Office 取预览件、其余取原件"这条分支再写一遍，
+     * 两处判据迟早会漂移（实测已经漂过一次：一处判 `!= null`、另一处判 `isBlank()`，
+     * 于是 `previewPath` 为空串时一边说能预览、另一边返回 404）。
+     *
+     * <p>放在这里而不是答案服务里：它讲的是"原件/预览件的形态"，
+     * 和 {@link #kindOf}、{@link #convertOfficeToPdf} 是同一件事。
+     */
+    public static String previewFileOf(String filePath, String previewPath) {
+        if (filePath == null || filePath.isBlank()) {
+            return null;
+        }
+        return switch (kindOf(DocumentParser.extensionOf(filePath))) {
+            case PDF, IMAGE, TEXT -> filePath;
+            case OFFICE -> (previewPath == null || previewPath.isBlank()) ? null : previewPath;
+            case UNSUPPORTED -> null;
+        };
     }
 
     /**

@@ -10,7 +10,6 @@ import com.jixiejia.agent.persistence.entity.ai.AiKnowledgeTable;
 import com.jixiejia.agent.persistence.mapper.ai.AiKnowledgeChunkMapper;
 import com.jixiejia.agent.persistence.mapper.ai.AiKnowledgeDocMapper;
 import com.jixiejia.agent.persistence.mapper.ai.AiKnowledgeTableMapper;
-import com.jixiejia.agent.rag.parse.DocumentParser;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
@@ -160,20 +159,13 @@ public class KnowledgeAnswerService {
     /**
      * 这份原件有没有浏览器能直接看的形式。
      *
-     * <p>和 {@code KnowledgeFileController} 里的取件逻辑是同一条规则：
-     * <b>默认原件就能看，只有 Office 要看转换成功没有</b>。
-     * 两边必须一致——否则会出现"前端以为能预览、点开却是 404"。
+     * <p>规则本身在 {@link KnowledgeFileStore#previewFileOf}——它要和
+     * {@code KnowledgeFileController} 的取件逻辑用同一条，
+     * 所以只留这一层薄薄的投影，不在这里再写一遍判据。
      */
     static boolean previewable(AiKnowledgeDoc doc) {
-        if (doc == null || doc.getFilePath() == null || doc.getFilePath().isBlank()) {
-            return false;
-        }
-        String ext = DocumentParser.extensionOf(doc.getFilePath());
-        return switch (KnowledgeFileStore.kindOf(ext)) {
-            case PDF, IMAGE, TEXT -> true;
-            case OFFICE -> doc.getPreviewPath() != null;
-            case UNSUPPORTED -> false;
-        };
+        return doc != null
+                && KnowledgeFileStore.previewFileOf(doc.getFilePath(), doc.getPreviewPath()) != null;
     }
 
     /**
@@ -233,7 +225,7 @@ public class KnowledgeAnswerService {
         }
 
         return new Answer(true, answer, gate.topScore(), gate.evidenceCount(), gate.reason(),
-                toSources(expanded, loadDocs(expanded)));
+                toSources(expanded, loadDocsById(expanded)));
     }
 
     private static String abbreviate(String s) {
@@ -318,7 +310,7 @@ public class KnowledgeAnswerService {
     }
 
     /** 一次把命中的文档捞出来，供溯源项判断"有没有原件可看"。 */
-    private Map<Long, AiKnowledgeDoc> loadDocs(List<KnowledgeRetriever.Hit> hits) {
+    private Map<Long, AiKnowledgeDoc> loadDocsById(List<KnowledgeRetriever.Hit> hits) {
         List<Long> ids = hits.stream()
                 .map(KnowledgeRetriever.Hit::docId)
                 .filter(Objects::nonNull)

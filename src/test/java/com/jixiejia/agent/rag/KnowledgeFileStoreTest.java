@@ -55,6 +55,34 @@ class KnowledgeFileStoreTest {
     }
 
     @Test
+    @DisplayName("该给浏览器看哪个文件：PDF/图片/纯文本就是原件本身")
+    void previewFileOfReturnsOriginalForRenderableKinds() {
+        assertThat(KnowledgeFileStore.previewFileOf("upload-a.pdf", null)).isEqualTo("upload-a.pdf");
+        assertThat(KnowledgeFileStore.previewFileOf("upload-a.png", null)).isEqualTo("upload-a.png");
+        assertThat(KnowledgeFileStore.previewFileOf("upload-a.txt", null)).isEqualTo("upload-a.txt");
+    }
+
+    @Test
+    @DisplayName("Office 文档取转出来的预览件；没转出来就没有可预览的形式")
+    void previewFileOfUsesConvertedPdfForOffice() {
+        assertThat(KnowledgeFileStore.previewFileOf("upload-a.docx", "upload-a.preview.pdf"))
+                .isEqualTo("upload-a.preview.pdf");
+        assertThat(KnowledgeFileStore.previewFileOf("upload-a.docx", null)).isNull();
+        // 空串也要当成"没转出来"——两处判据不一致过一次，就是这里漏的
+        assertThat(KnowledgeFileStore.previewFileOf("upload-a.docx", "")).isNull();
+        assertThat(KnowledgeFileStore.previewFileOf("upload-a.docx", "   ")).isNull();
+    }
+
+    @Test
+    @DisplayName("没有原件、或格式不支持预览的，一律返回 null")
+    void previewFileOfReturnsNullWhenNothingToShow() {
+        assertThat(KnowledgeFileStore.previewFileOf(null, null)).isNull();
+        assertThat(KnowledgeFileStore.previewFileOf("", null)).isNull();
+        assertThat(KnowledgeFileStore.previewFileOf("   ", null)).isNull();
+        assertThat(KnowledgeFileStore.previewFileOf("upload-a.zip", null)).isNull();
+    }
+
+    @Test
     @DisplayName("resolve 不允许跳出落盘目录")
     void resolveRejectsPathTraversal(@TempDir Path dir) {
         KnowledgeFileStore store = new KnowledgeFileStore(dir.toString());
