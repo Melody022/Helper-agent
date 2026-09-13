@@ -7,8 +7,8 @@ import com.jixiejia.agent.graph.CompositeGraph;
 import com.jixiejia.agent.rag.FlywheelService;
 import com.jixiejia.agent.rag.KnowledgeAnswerService;
 import com.jixiejia.agent.router.ConversationMemory;
-import com.jixiejia.agent.router.MsgRouter;
 import com.jixiejia.agent.router.RoutingDecision;
+import com.jixiejia.agent.router.RoutingGraph;
 import com.jixiejia.agent.router.RoutingRequest;
 import com.jixiejia.agent.tool.ToolRegistry;
 import lombok.RequiredArgsConstructor;
@@ -45,7 +45,7 @@ public class ChatService {
     private static final String COMPOSITE_FAILED_REPLY =
             "抱歉，你这几个问题我都没能查到，可以分开一个个问，或者回复\"转人工\"联系客服。";
 
-    private final MsgRouter msgRouter;
+    private final RoutingGraph routingGraph;
     private final AgentExecutor agentExecutor;
     private final ToolRegistry toolRegistry;
     private final ConversationMemory conversationMemory;
@@ -104,7 +104,7 @@ public class ChatService {
 
         // ② 路由（内部完成身份/命令/粘性/指代/意图/匹配/审计）
         RoutingRequest request = new RoutingRequest(convId, userId, memberId, roleKey, message);
-        RoutingDecision decision = msgRouter.route(request);
+        RoutingDecision decision = routingGraph.route(request);
 
         if (onRouted != null) {
             try {

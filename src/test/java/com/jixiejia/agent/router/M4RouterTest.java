@@ -46,7 +46,7 @@ class M4RouterTest {
     private static final String TEST_CONVERSATION_PREFIX = "test-";
 
     @Autowired
-    private MsgRouter msgRouter;
+    private RoutingGraph routingGraph;
 
     @Autowired
     private KeywordWeightClassifier keywordClassifier;
@@ -160,7 +160,7 @@ class M4RouterTest {
     @Test
     @DisplayName("身份：未登录一律拦下")
     void anonymousIsBlocked() {
-        RoutingDecision blocked = msgRouter.route(
+        RoutingDecision blocked = routingGraph.route(
                 new RoutingRequest(newConversationId(), null, null, "USER", "有没有二手的挖掘机"));
 
         assertThat(blocked.stage()).isEqualTo(RouteStage.IDENTITY);
@@ -172,13 +172,13 @@ class M4RouterTest {
     @Test
     @DisplayName("身份：账号不存在 / 已停用都拦下，正常账号放行")
     void identityCheck() {
-        RoutingDecision missing = msgRouter.route(
+        RoutingDecision missing = routingGraph.route(
                 new RoutingRequest(newConversationId(), 99999999L, null, "USER", "你好"));
         assertThat(missing.stage()).isEqualTo(RouteStage.IDENTITY);
         assertThat(missing.reply()).contains("不存在");
 
         // 已登录的正常账号应当放行并正常路由
-        RoutingDecision ok = msgRouter.route(request(newConversationId(), "有没有二手的挖掘机"));
+        RoutingDecision ok = routingGraph.route(request(newConversationId(), "有没有二手的挖掘机"));
         assertThat(ok.stage()).isNotEqualTo(RouteStage.IDENTITY);
         assertThat(ok.agentKey()).isEqualTo("EquipmentAgent");
     }
@@ -194,7 +194,7 @@ class M4RouterTest {
         aiUserMapper.insert(user);
 
         try {
-            RoutingDecision decision = msgRouter.route(
+            RoutingDecision decision = routingGraph.route(
                     new RoutingRequest(newConversationId(), user.getId(), null, "USER", "你好"));
             assertThat(decision.stage()).isEqualTo(RouteStage.IDENTITY);
             assertThat(decision.reply()).contains("停用");
@@ -210,11 +210,11 @@ class M4RouterTest {
     void resetCommandClearsSticky() {
         String conversationId = newConversationId();
 
-        RoutingDecision first = msgRouter.route(request(conversationId, "有没有二手的挖掘机"));
+        RoutingDecision first = routingGraph.route(request(conversationId, "有没有二手的挖掘机"));
         assertThat(first.agentKey()).isEqualTo("EquipmentAgent");
         assertThat(stickySessionStore.find(conversationId)).isPresent();
 
-        RoutingDecision reset = msgRouter.route(request(conversationId, "/reset"));
+        RoutingDecision reset = routingGraph.route(request(conversationId, "/reset"));
         assertThat(reset.stage()).isEqualTo(RouteStage.COMMAND);
         assertThat(reset.isShortCircuited()).isTrue();
         assertThat(reset.reply()).contains("已重置");
@@ -225,7 +225,7 @@ class M4RouterTest {
     @Test
     @DisplayName("已取消 /help：斜杠内容不再被当成命令，交回正常链路")
     void helpIsNoLongerACommand() {
-        RoutingDecision decision = msgRouter.route(request(newConversationId(), "/help"));
+        RoutingDecision decision = routingGraph.route(request(newConversationId(), "/help"));
         assertThat(decision.stage()).isNotEqualTo(RouteStage.COMMAND);
     }
 
@@ -236,12 +236,12 @@ class M4RouterTest {
     void fuzzyFollowUpReusesStickyWithoutModel() {
         String conversationId = newConversationId();
 
-        RoutingDecision first = msgRouter.route(request(conversationId, "有没有二手的挖掘机"));
+        RoutingDecision first = routingGraph.route(request(conversationId, "有没有二手的挖掘机"));
         assertThat(first.agentKey()).isEqualTo("EquipmentAgent");
         assertThat(first.stage()).isEqualTo(RouteStage.EXECUTE);
 
         // "那这个呢"关键词命中不了 → 粘性兜住
-        RoutingDecision followUp = msgRouter.route(request(conversationId, "那这个呢"));
+        RoutingDecision followUp = routingGraph.route(request(conversationId, "那这个呢"));
         assertThat(followUp.stage()).isEqualTo(RouteStage.STICKY);
         assertThat(followUp.agentKey()).isEqualTo("EquipmentAgent");
 
@@ -255,7 +255,7 @@ class M4RouterTest {
     void longNewQuestionIsNotSwallowedBySticky() {
         String conversationId = newConversationId();
 
-        RoutingDecision first = msgRouter.route(request(conversationId, "有没有二手的挖掘机"));
+        RoutingDecision first = routingGraph.route(request(conversationId, "有没有二手的挖掘机"));
         assertThat(first.agentKey()).isEqualTo("EquipmentAgent");
 
         // 实测踩过的场景：用户问完设备，接着问了一句安全规范。
@@ -264,7 +264,7 @@ class M4RouterTest {
         //
         // 原来的判据是"关键词没命中就用粘性兜住"，于是它被一直粘在 EquipmentAgent 上，
         // 连问两轮都答"我帮不上忙"——而知识库里其实有那份国标、答得上来。
-        RoutingDecision second = msgRouter.route(request(conversationId,
+        RoutingDecision second = routingGraph.route(request(conversationId,
                 "挖掘机操纵杆和其他零件的距离应该控制在多少"));
 
         assertThat(second.stage())
@@ -283,9 +283,9 @@ class M4RouterTest {
         // 用户实测报回来的场景：上一轮聊过租赁，接着问驾驶室要求，
         // 被粘在了 RentalAgent 上。根因是当时还有一条"字数 ≤ 12 就算追问"的判据，
         // 而这句话**正好 12 个字**——中文一句话信息密度高，12 个字已经是一句完整的问题。
-        msgRouter.route(request(conversationId, "有没有二手的挖掘机出租"));
+        routingGraph.route(request(conversationId, "有没有二手的挖掘机出租"));
 
-        RoutingDecision next = msgRouter.route(request(conversationId,
+        RoutingDecision next = routingGraph.route(request(conversationId,
                 "挖掘机驾驶室有什么要求吗"));
 
         assertThat(next.stage())
@@ -298,10 +298,10 @@ class M4RouterTest {
     void anaphoricFollowUpStillUsesSticky() {
         String conversationId = newConversationId();
 
-        msgRouter.route(request(conversationId, "有没有二手的挖掘机"));
+        routingGraph.route(request(conversationId, "有没有二手的挖掘机"));
 
         // "那这个呢"含指代词——脱离上文根本理解不了，几乎必然是追问
-        RoutingDecision followUp = msgRouter.route(request(conversationId, "那这个呢"));
+        RoutingDecision followUp = routingGraph.route(request(conversationId, "那这个呢"));
 
         assertThat(followUp.stage()).isEqualTo(RouteStage.STICKY);
         assertThat(followUp.agentKey()).isEqualTo("EquipmentAgent");
@@ -313,12 +313,12 @@ class M4RouterTest {
     void shortNonAnaphoricQuestionDoesNotUseSticky() {
         String conversationId = newConversationId();
 
-        msgRouter.route(request(conversationId, "有没有二手的挖掘机"));
+        routingGraph.route(request(conversationId, "有没有二手的挖掘机"));
 
         // "多少钱"只有三个字，但字面意思已经完整——它不指代任何东西。
         // 曾经它因为"够短"被粘性兜住；现在交给第 ④⑤ 步连同上文一起判，
         // 代价是多跑一次本地小模型（免费），换来的是**路由可预测**。
-        RoutingDecision followUp = msgRouter.route(request(conversationId, "多少钱"));
+        RoutingDecision followUp = routingGraph.route(request(conversationId, "多少钱"));
 
         assertThat(followUp.stage())
                 .as("判据只剩「含指代词」一条，短不再是理由")
@@ -330,9 +330,9 @@ class M4RouterTest {
     void sameTopicKeywordKeepsSticky() {
         String conversationId = newConversationId();
 
-        msgRouter.route(request(conversationId, "有没有二手的挖掘机"));
+        routingGraph.route(request(conversationId, "有没有二手的挖掘机"));
 
-        RoutingDecision second = msgRouter.route(request(conversationId, "有二手装载机吗"));
+        RoutingDecision second = routingGraph.route(request(conversationId, "有二手装载机吗"));
         assertThat(second.stage()).isEqualTo(RouteStage.STICKY);
         assertThat(second.agentKey()).isEqualTo("EquipmentAgent");
         // 关键词层已经定案，同样没走模型
@@ -345,10 +345,10 @@ class M4RouterTest {
     void differentTopicSwitchesAgent() {
         String conversationId = newConversationId();
 
-        msgRouter.route(request(conversationId, "有没有二手的挖掘机"));
+        routingGraph.route(request(conversationId, "有没有二手的挖掘机"));
 
         // 关键词高置信指向别的领域 → 切走，不被粘性拽住
-        RoutingDecision switched = msgRouter.route(request(conversationId, "我想求租"));
+        RoutingDecision switched = routingGraph.route(request(conversationId, "我想求租"));
         assertThat(switched.stage()).isEqualTo(RouteStage.EXECUTE);
         assertThat(switched.agentKey()).isEqualTo("RentalAgent");
         assertThat(switched.reason()).contains("切换到");
@@ -360,7 +360,7 @@ class M4RouterTest {
         String conversationId = newConversationId();
 
         // 全新会话 + 关键词命中不到 → 必须走分类（测试里模型层关着，故落 UNKNOWN → 兜底 Agent）
-        RoutingDecision decision = msgRouter.route(request(conversationId, "帮我看看那个东西"));
+        RoutingDecision decision = routingGraph.route(request(conversationId, "帮我看看那个东西"));
         assertThat(decision.agentKey()).isEqualTo("GeneralAgent");
         assertThat(decision.intent()).isEqualTo(Intent.UNKNOWN);
     }
@@ -423,12 +423,12 @@ class M4RouterTest {
     @Test
     @DisplayName("转人工与投诉都短路，不进 Agent")
     void shortCircuitIntents() {
-        RoutingDecision handoff = msgRouter.route(request(newConversationId(), "转人工"));
+        RoutingDecision handoff = routingGraph.route(request(newConversationId(), "转人工"));
         assertThat(handoff.stage()).isEqualTo(RouteStage.HANDOFF);
         assertThat(handoff.agentKey()).isNull();
         assertThat(handoff.reply()).contains("转接人工客服");
 
-        RoutingDecision complaint = msgRouter.route(request(newConversationId(), "我要投诉"));
+        RoutingDecision complaint = routingGraph.route(request(newConversationId(), "我要投诉"));
         assertThat(complaint.stage()).isEqualTo(RouteStage.COMPLAINT);
         assertThat(complaint.agentKey()).isNull();
         // 投诉只给选项，不自动建单
@@ -462,7 +462,7 @@ class M4RouterTest {
         // 手工塞一条指向不存在 Agent 的粘性记录，模拟 Agent 被停用/删除后的残留
         stickySessionStore.save(conversationId, "NoSuchAgent", Intent.EQUIPMENT_QUERY);
 
-        RoutingDecision decision = msgRouter.route(request(conversationId, "那这个呢"));
+        RoutingDecision decision = routingGraph.route(request(conversationId, "那这个呢"));
         // 不能把消息硬塞给一个已下线的 Agent，必须重新走到匹配逻辑
         assertThat(decision.agentKey()).isNotNull().isNotEqualTo("NoSuchAgent");
     }
@@ -471,7 +471,7 @@ class M4RouterTest {
     @DisplayName("审计：每次路由都落一条，含命中的步骤与分类层")
     void auditIsWritten() {
         String conversationId = newConversationId();
-        msgRouter.route(request(conversationId, "有没有二手的挖掘机"));
+        routingGraph.route(request(conversationId, "有没有二手的挖掘机"));
 
         var rows = auditLogMapper.selectList(Wrappers.<AiAuditLog>lambdaQuery()
                 .eq(AiAuditLog::getConversationId, conversationId));
@@ -491,7 +491,7 @@ class M4RouterTest {
     @DisplayName("审计：短路路径也留痕")
     void auditRecordsShortCircuit() {
         String conversationId = newConversationId();
-        msgRouter.route(request(conversationId, "我要投诉"));
+        routingGraph.route(request(conversationId, "我要投诉"));
 
         var rows = auditLogMapper.selectList(Wrappers.<AiAuditLog>lambdaQuery()
                 .eq(AiAuditLog::getConversationId, conversationId));
@@ -505,7 +505,7 @@ class M4RouterTest {
     @DisplayName("审计：未登录也被记录，便于排查")
     void auditRecordsIdentityBlock() {
         String conversationId = newConversationId();
-        msgRouter.route(new RoutingRequest(conversationId, null, null, "USER", "你好"));
+        routingGraph.route(new RoutingRequest(conversationId, null, null, "USER", "你好"));
 
         var rows = auditLogMapper.selectList(Wrappers.<AiAuditLog>lambdaQuery()
                 .eq(AiAuditLog::getConversationId, conversationId));

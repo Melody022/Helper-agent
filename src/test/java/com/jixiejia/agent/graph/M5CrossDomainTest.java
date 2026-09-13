@@ -11,7 +11,7 @@ import com.jixiejia.agent.persistence.mapper.ai.AiAuditLogMapper;
 import com.jixiejia.agent.persistence.mapper.ai.AiConversationMapper;
 import com.jixiejia.agent.persistence.mapper.ai.AiMessageMapper;
 import com.jixiejia.agent.persistence.mapper.ai.AiUserMapper;
-import com.jixiejia.agent.router.MsgRouter;
+import com.jixiejia.agent.router.RoutingGraph;
 import com.jixiejia.agent.router.RouteStage;
 import com.jixiejia.agent.router.RoutingDecision;
 import com.jixiejia.agent.router.RoutingRequest;
@@ -39,7 +39,7 @@ class M5CrossDomainTest {
     private static final String CONV_PREFIX = "test-";
 
     @Autowired
-    private MsgRouter msgRouter;
+    private RoutingGraph routingGraph;
 
     @Autowired
     private ChatService chatService;
@@ -87,7 +87,7 @@ class M5CrossDomainTest {
     }
 
     private RoutingDecision route(String message) {
-        return msgRouter.route(new RoutingRequest(
+        return routingGraph.route(new RoutingRequest(
                 CONV_PREFIX + UUID.randomUUID(), userId, null, "USER", message));
     }
 
@@ -161,7 +161,7 @@ class M5CrossDomainTest {
     @DisplayName("跨域也被记进审计，便于排查这条昂贵路径")
     void compositeIsAudited() {
         String conversationId = CONV_PREFIX + UUID.randomUUID();
-        msgRouter.route(new RoutingRequest(conversationId, userId, null, "USER",
+        routingGraph.route(new RoutingRequest(conversationId, userId, null, "USER",
                 "有二手的挖掘机吗，另外有没有挖掘机出租"));
 
         var rows = auditLogMapper.selectList(Wrappers.<AiAuditLog>lambdaQuery()

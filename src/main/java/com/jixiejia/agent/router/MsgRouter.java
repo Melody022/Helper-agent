@@ -59,7 +59,7 @@ public class MsgRouter {
             你也可以先留言说明具体问题，客服接入后能直接看到，省去重复描述。""";
 
     /** 注册表里一个可用 Agent 都没有时的兜底话术（正常运维下不该出现） */
-    private static final String NO_AGENT_REPLY =
+    static final String NO_AGENT_REPLY =
             "抱歉，助手当前不可用，请稍后再试或回复\"转人工\"联系客服。";
 
     private final AiUserMapper userMapper;
@@ -239,9 +239,9 @@ public class MsgRouter {
      * <p>此时不需要任何模型：意图是确定的，只需要判断该不该沿用粘性里的 Agent。
      * 判据很直接——意图和上一轮一样就继续用，不一样就切。
      */
-    private RoutingDecision routeByKnownIntent(RoutingRequest request, IntentResult keywordIntent,
-                                               Optional<StickySessionStore.StickySession> sticky,
-                                               String roleKey, long start) {
+    RoutingDecision routeByKnownIntent(RoutingRequest request, IntentResult keywordIntent,
+                                       Optional<StickySessionStore.StickySession> sticky,
+                                       String roleKey, long start) {
         Intent intent = keywordIntent.intent();
 
         // 转人工 / 投诉：关键词命中即短路，不进 Agent
@@ -290,7 +290,7 @@ public class MsgRouter {
      *
      * @return 命中 ≥2 个 Agent 时返回它们（按关键词强弱排序、已截到上限），否则 empty
      */
-    private Optional<List<String>> detectCrossDomain(String message, String roleKey) {
+    Optional<List<String>> detectCrossDomain(String message, String roleKey) {
         if (keywordClassifier.highWeightIntents(message).size() < 2) {
             return Optional.empty();
         }
@@ -310,7 +310,7 @@ public class MsgRouter {
      *
      * @return 去重后的 Agent 列表，可能为空或只有 1 个（调用方据此决定退化成单域）
      */
-    private List<String> resolveCrossAgents(IntentResult intent, String text, String roleKey) {
+    List<String> resolveCrossAgents(IntentResult intent, String text, String roleKey) {
         Set<String> agents = new LinkedHashSet<>();
 
         if (intent != null && intent.hasDomains()) {
@@ -338,7 +338,7 @@ public class MsgRouter {
     }
 
     /** 短路意图（转人工 / 投诉）对应的决策。 */
-    private RoutingDecision shortCircuitFor(IntentResult intent) {
+    RoutingDecision shortCircuitFor(IntentResult intent) {
         return switch (intent.intent()) {
             case HANDOFF -> RoutingDecision.shortCircuit(RouteStage.HANDOFF, intent.intent(),
                     HANDOFF_REPLY, "意图判为转人工");
@@ -352,7 +352,7 @@ public class MsgRouter {
      * 匹配 Agent。preferredAgentKey 非空时优先复用该 Agent（粘性场景），
      * 但它已被停用/删除时自动退回按意图重新匹配。
      */
-    private AgentRegistry.AgentMatch matchAgent(Intent intent, String roleKey, String preferredAgentKey) {
+    AgentRegistry.AgentMatch matchAgent(Intent intent, String roleKey, String preferredAgentKey) {
         Optional<AgentRegistry.AgentMatch> preferred = preferredAgentKey == null
                 ? Optional.empty()
                 : agentRegistry.byKey(preferredAgentKey, roleKey);
@@ -369,7 +369,7 @@ public class MsgRouter {
      * <p>之所以不像常见客服机器人那样允许游客提问：这个助手能查到设备卖家、会员等
      * 平台侧数据，也能代用户发起发布，匿名使用既没法做权限控制，也没法把发布落到具体会员头上。
      */
-    private Optional<RoutingDecision> checkIdentity(RoutingRequest request) {
+    Optional<RoutingDecision> checkIdentity(RoutingRequest request) {
         if (request.aiUserId() == null) {
             return Optional.of(RoutingDecision.shortCircuit(RouteStage.IDENTITY, Intent.UNKNOWN,
                     "请先登录后再使用智能助手。", "未登录"));
@@ -388,7 +388,7 @@ public class MsgRouter {
     }
 
     /** 路由收尾：写粘性、更新会话、落审计。 */
-    private RoutingDecision auditAndReturn(RoutingRequest request, RoutingDecision decision, long start) {
+    RoutingDecision auditAndReturn(RoutingRequest request, RoutingDecision decision, long start) {
         String agentKey = decision.agentKey();
         Intent intent = decision.intent();
 
@@ -404,7 +404,20 @@ public class MsgRouter {
         return decision;
     }
 
-    private static int elapsed(long start) {
+    static int elapsed(long start) {
         return (int) (System.currentTimeMillis() - start);
+    }
+
+    /**
+     * 链路自身出错时的兜底决策：记一条失败审计，再返回一句能看懂的话。
+     *
+     * <p>抽出来是给状态图复用——图和原来的方法链必须走<b>同一套</b>异常处理，
+     * 否则"图化之后出错路径的行为变了"这种事没人会发现。
+     */
+    RoutingDecision errorDecision(RoutingRequest request, Exception e, long start) {
+        log.error("路由链异常", e);
+        auditService.recordError(request, e.toString(), elapsed(start));
+        return RoutingDecision.shortCircuit(RouteStage.ERROR, Intent.UNKNOWN,
+                "抱歉，系统出了点问题，请稍后再试或回复\"转人工\"。", "路由链异常：" + e);
     }
 }

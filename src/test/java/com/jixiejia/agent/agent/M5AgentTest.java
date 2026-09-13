@@ -5,7 +5,7 @@ import com.jixiejia.agent.persistence.entity.ai.AiAgent;
 import com.jixiejia.agent.persistence.entity.ai.AiUser;
 import com.jixiejia.agent.persistence.mapper.ai.AiAgentMapper;
 import com.jixiejia.agent.persistence.mapper.ai.AiUserMapper;
-import com.jixiejia.agent.router.MsgRouter;
+import com.jixiejia.agent.router.RoutingGraph;
 import com.jixiejia.agent.router.RoutingDecision;
 import com.jixiejia.agent.router.RoutingRequest;
 import com.jixiejia.agent.tool.ToolRegistry;
@@ -44,7 +44,7 @@ class M5AgentTest {
     private AgentExecutor agentExecutor;
 
     @Autowired
-    private MsgRouter msgRouter;
+    private RoutingGraph routingGraph;
 
     @Autowired
     private ToolRegistry toolRegistry;
@@ -115,7 +115,7 @@ class M5AgentTest {
     @Test
     @DisplayName("装配：兜底 Agent 拿不到任何工具")
     void fallbackAgentHasNoTools() {
-        RoutingDecision decision = msgRouter.route(new RoutingRequest(
+        RoutingDecision decision = routingGraph.route(new RoutingRequest(
                 "test-" + UUID.randomUUID(), createUser(), null, "USER", "你好呀"));
 
         assertThat(decision.agentKey()).isEqualTo("GeneralAgent");
@@ -128,7 +128,7 @@ class M5AgentTest {
     @DisplayName("真跑：设备查询走通路由 → Agent → 工具 → 回答，且数据来自真实库")
     void equipmentAgentAnswersWithRealData() {
         Long userId = createUser();
-        RoutingDecision decision = msgRouter.route(new RoutingRequest(
+        RoutingDecision decision = routingGraph.route(new RoutingRequest(
                 "test-" + UUID.randomUUID(), userId, null, "USER", "有没有二手的挖掘机"));
 
         assertThat(decision.agentKey()).isEqualTo("EquipmentAgent");
@@ -153,7 +153,7 @@ class M5AgentTest {
     @DisplayName("真跑：平台规则问题必须诚实说不知道，不能编规则")
     void knowledgeAgentRefusesToInventPolicy() {
         Long userId = createUser();
-        RoutingDecision decision = msgRouter.route(new RoutingRequest(
+        RoutingDecision decision = routingGraph.route(new RoutingRequest(
                 "test-" + UUID.randomUUID(), userId, null, "USER", "在平台租设备的流程和押金怎么算"));
 
         assertThat(decision.agentKey()).isEqualTo("KnowledgeAgent");

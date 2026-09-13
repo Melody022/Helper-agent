@@ -31,8 +31,14 @@ public class StickySessionStore {
 
     private static final String KEY_PREFIX = "ai:sticky:";
 
-    /** 粘性记录。 */
-    public record StickySession(String agentKey, String intent, long updatedAt) {
+    /**
+     * 粘性记录。
+     *
+     * <p>{@code Serializable} 是给路由状态图用的：它要作为状态在图的节点之间传递，
+     * 而 LangGraph4j 在克隆状态与接 checkpointer 时会序列化整个状态。
+     */
+    public record StickySession(String agentKey, String intent, long updatedAt)
+            implements java.io.Serializable {
     }
 
     private final StringRedisTemplate redis;
