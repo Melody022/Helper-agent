@@ -1,34 +1,31 @@
 package com.jixiejia.agent.chat;
 
-import com.jixiejia.agent.agent.AgentContext;
-import com.jixiejia.agent.agent.AgentExecutor;
 import com.jixiejia.agent.classify.Intent;
-import com.jixiejia.agent.graph.CompositeGraph;
 import com.jixiejia.agent.rag.FlywheelService;
 import com.jixiejia.agent.rag.KnowledgeAnswerService;
 import com.jixiejia.agent.router.ConversationMemory;
 import com.jixiejia.agent.router.RoutingDecision;
 import com.jixiejia.agent.router.RoutingGraph;
 import com.jixiejia.agent.router.RoutingRequest;
-import com.jixiejia.agent.tool.ToolRegistry;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.ai.chat.messages.Message;
-import org.springframework.ai.tool.ToolCallback;
 import org.springframework.stereotype.Service;
 
 import java.util.List;
 import java.util.UUID;
 
 /**
- * 对话主流程：路由 → （短路或执行 Agent）→ 落库。
+ * 对话入口：把一轮请求交给路由状态图，再把结果落库。
+ *
+ * <p><b>本类已经很薄了</b>——路由、审计、三条执行路全在 {@link RoutingGraph} 上。
+ * 留在这里的只有图的"外面"该做的事：生成会话 id、落消息、记飞轮、拼返回值。
  *
  * <p>顺序上有两处不能颠倒：
  * <ol>
- *   <li><b>先取历史，再存本轮用户消息。</b>反过来的话，当前这句会被当成历史
- *       重复喂给模型，指代消解也会把"这个"指到它自己身上。</li>
- *   <li><b>先路由，后执行。</b>路由是纯判定，失败也要能落审计；
- *       Agent 执行可能很慢甚至超时，不该拖累判定与留痕。</li>
+ *   <li><b>先跑图，再落本轮用户消息。</b>图里的指代消解会读"最近几轮"，
+ *       要是先把这句存进去，它就会把"这个"指到它自己身上。</li>
+ *   <li><b>先路由，后执行。</b>这一点现在由图的形状保证了：
+ *       审计节点在分派节点之前，执行永远发生在审计之后。</li>
  * </ol>
  */
 @Slf4j
@@ -36,21 +33,8 @@ import java.util.UUID;
 @RequiredArgsConstructor
 public class ChatService {
 
-    /** 带进模型的历史轮数 */
-    private static final int HISTORY_ROUNDS = 5;
-
-    private static final String AGENT_MISSING_REPLY =
-            "抱歉，这个功能暂时不可用，请稍后再试或回复\"转人工\"联系客服。";
-
-    private static final String COMPOSITE_FAILED_REPLY =
-            "抱歉，你这几个问题我都没能查到，可以分开一个个问，或者回复\"转人工\"联系客服。";
-
     private final RoutingGraph routingGraph;
-    private final AgentExecutor agentExecutor;
-    private final ToolRegistry toolRegistry;
     private final ConversationMemory conversationMemory;
-    private final CompositeGraph compositeGraph;
-    private final KnowledgeAnswerService knowledgeAnswerService;
     private final FlywheelService flywheelService;
 
     /**
@@ -99,98 +83,38 @@ public class ChatService {
                 ? UUID.randomUUID().toString()
                 : conversationId;
 
-        // ① 历史要在保存本轮消息之前取
-        List<Message> history = conversationMemory.recentMessagesForModel(convId, HISTORY_ROUNDS);
-
-        // ② 路由（内部完成身份/命令/粘性/指代/意图/匹配/审计）
-        RoutingRequest request = new RoutingRequest(convId, userId, memberId, roleKey, message);
-        RoutingDecision decision = routingGraph.route(request);
-
-        if (onRouted != null) {
-            try {
-                onRouted.accept(decision);
-            } catch (Exception e) {
-                // 回调失败（比如前端已断开）不该影响这轮对话本身
-                log.debug("路由回调执行失败，忽略：{}", e.toString());
-            }
-        }
-
-        // ③ 落用户消息，供下一轮当历史
-        conversationMemory.saveUserMessage(convId, message);
-
-        // ④ 短路：转人工/投诉/系统命令，直接用固定话术回
-        if (decision.isShortCircuited()) {
-            conversationMemory.saveAssistantMessage(convId, decision.reply(),
-                    decision.intent() == null ? null : decision.intent().name(),
-                    1.0, null, null);
-            return new ChatResult(convId, decision.reply(),
-                    decision.intent() == null ? null : decision.intent().name(),
-                    1.0, null, decision.stage().code(), true);
-        }
-
-        // ⑤ 执行。三条路：平台规则走检索+证据闸，跨域走综合子图，其余走单 Agent。
         long startedAt = System.currentTimeMillis();
 
-        String answer;
-        String executedAgentKey;
-        List<KnowledgeAnswerService.Source> sources = List.of();
-        if (decision.intent() == Intent.KNOWLEDGE_QUERY) {
-            // 平台规则单独一条路，不经过 ReAct Agent。
-            // 因为这条道的硬要求是"资料不足就不许答"，而 Agent 里的模型有自主权，
-            // 完全可能不去查资料、直接凭对同类平台的印象回答——那样证据闸就形同虚设。
-            KnowledgeAnswerService.Answer knowledge =
-                    knowledgeAnswerService.answer(decision.resolvedText(), convId);
-            answer = knowledge.text();
-            executedAgentKey = "Knowledge(检索+证据闸)";
-            sources = knowledge.sources();
-            if (!knowledge.answered()) {
-                // 没答上来意味着这是个知识盲区，记进飞轮等人工补
-                log.debug("知识线未作答：{}", knowledge.note());
-            }
-        } else if (decision.isComposite()) {
-            answer = runComposite(decision, roleKey);
-            // 审计里记下本轮实际跑了哪些 Agent，用逗号分隔
-            executedAgentKey = String.join(",", decision.targetAgents());
-        } else {
-            ToolCallback[] tools = toolRegistry.callbacksFor(decision.toolNames());
-            answer = agentExecutor
-                    .execute(decision.agentKey(), new AgentContext(
-                            convId, userId, memberId, roleKey,
-                            decision.resolvedText(), history, List.of(tools)))
-                    .orElseGet(() -> {
-                        log.warn("路由选中了 Agent {}，但代码中没有对应实现", decision.agentKey());
-                        return AGENT_MISSING_REPLY;
-                    });
-            executedAgentKey = decision.agentKey();
+        // ① 图：判定 → 审计 → 执行，一条龙。onRouted 由分派节点在"审计完、执行前"触发
+        RoutingRequest request = new RoutingRequest(convId, userId, memberId, roleKey, message);
+        RoutingGraph.RoutingResult result = routingGraph.run(request, onRouted);
+        RoutingDecision decision = result.decision();
+
+        // ② 落本轮用户消息。放在图之后是有意的：图里的指代消解不该看到这一句
+        conversationMemory.saveUserMessage(convId, message);
+
+        String answer = result.answer();
+        if (answer == null || answer.isBlank()) {
+            // 短路回复没经过执行节点，回答就是决策里那句话
+            answer = decision.reply() == null ? "" : decision.reply();
         }
 
         // 意图完全没识别出来也是一类知识盲区：用户问的东西系统根本没这套业务
-        if (decision.intent() == Intent.UNKNOWN) {
+        if (decision.intent() == Intent.UNKNOWN && !decision.isShortCircuited()) {
             flywheelService.record(FlywheelService.SOURCE_LOW_CONFIDENCE,
                     convId, message, answer, decision.confidence());
         }
 
         int latency = (int) (System.currentTimeMillis() - startedAt);
 
-        // ⑥ 落助手消息
+        // ③ 落助手消息
         conversationMemory.saveAssistantMessage(convId, answer,
                 decision.intent() == null ? null : decision.intent().name(),
-                decision.confidence(), executedAgentKey, latency);
+                decision.confidence(), result.executedAgentKey(), latency);
 
         return new ChatResult(convId, answer,
                 decision.intent() == null ? null : decision.intent().name(),
-                decision.confidence(), executedAgentKey, decision.stage().code(), false, sources);
-    }
-
-    /** 跨域：交给综合子图并行跑各域再汇总。 */
-    private String runComposite(RoutingDecision decision, String roleKey) {
-        CompositeGraph.CompositeResult result = compositeGraph.run(
-                decision.resolvedText(), roleKey, decision.targetAgents());
-
-        if (result.answer() == null || result.answer().isBlank()) {
-            log.warn("跨域综合未产出回答，目标域={}", result.agentKeys());
-            return COMPOSITE_FAILED_REPLY;
-        }
-        return result.answer();
+                decision.confidence(), result.executedAgentKey(), decision.stage().code(),
+                decision.isShortCircuited(), result.sources());
     }
 }

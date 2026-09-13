@@ -117,7 +117,7 @@ public class KnowledgeAnswerService {
      *                    提前告诉前端，免得点开一个角标才发现没有预览、还要等一次失败的请求
      */
     public record Source(Long docId, String title, String sectionPath, Integer pageNo,
-                         String snippet, boolean previewable) {
+                         String snippet, boolean previewable) implements java.io.Serializable {
     }
 
     /** 单次知识问答的结果。 */

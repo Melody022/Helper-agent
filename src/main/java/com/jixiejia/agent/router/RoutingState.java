@@ -3,6 +3,7 @@ package com.jixiejia.agent.router;
 import com.jixiejia.agent.classify.ClassifyLayer;
 import com.jixiejia.agent.classify.Intent;
 import com.jixiejia.agent.classify.IntentResult;
+import com.jixiejia.agent.rag.KnowledgeAnswerService;
 import org.bsc.langgraph4j.state.AgentState;
 import org.bsc.langgraph4j.state.Channel;
 import org.bsc.langgraph4j.state.Channels;
@@ -97,6 +98,25 @@ public class RoutingState extends AgentState {
      * 它同时充当"是否已定案"的标记——比在每条边上重复判断业务条件更不容易漏。
      */
     public static final String DECISIONS = "decisions";
+
+    /** 执行之后要交给用户的回答（短路时就是决策里的 reply） */
+    public static final String ANSWER = "answer";
+
+    /** 实际执行了谁：单 Agent 的 key、跨域的多个 key、或"Knowledge(检索+证据闸)" */
+    public static final String EXECUTED_AGENT_KEY = "executedAgentKey";
+
+    /** 知识问答的溯源依据，前端拿它渲染可点角标 */
+    public static final String SOURCES = "sources";
+
+    /**
+     * 定案之后要不要真的执行。
+     *
+     * <p>存在的理由只有一个：{@code SameDecisionTest} 要拿<b>只判定不执行</b>的口径
+     * 去和旧的 {@code MsgRouter.route()} 逐字段比对——旧实现本来就不执行。
+     * 如果那条路也会真去调 Agent，对照测试会变成"跑 17 遍真实模型"，
+     * 既慢又会把模型的不确定性引进来。
+     */
+    public static final String EXECUTE = "execute";
 
     // ---------- 控制 ----------
 
@@ -196,6 +216,22 @@ public class RoutingState extends AgentState {
         return all.isEmpty() ? null : all.get(0);
     }
 
+    public String answer() {
+        return this.<String>value(ANSWER).orElse("");
+    }
+
+    public String executedAgentKey() {
+        return this.<String>value(EXECUTED_AGENT_KEY).orElse(null);
+    }
+
+    public List<KnowledgeAnswerService.Source> sources() {
+        return this.<List<KnowledgeAnswerService.Source>>value(SOURCES).orElse(List.of());
+    }
+
+    public boolean executeEnabled() {
+        return this.<Boolean>value(EXECUTE).orElse(Boolean.TRUE);
+    }
+
     // ---------- 工具方法 ----------
 
     /** 空串还原成 null——用来区分"没写过"和"写了个空串"。 */
@@ -249,6 +285,12 @@ public class RoutingState extends AgentState {
 
         // 唯一一个 appender：装整个决策对象，见类注释第 2 条
         schema.put(DECISIONS, Channels.<List<RoutingDecision>>appender(() -> new ArrayList<>()));
+
+        schema.put(ANSWER, Channels.<String>base(() -> ""));
+        schema.put(EXECUTED_AGENT_KEY, Channels.<String>base(() -> ""));
+        schema.put(SOURCES, Channels.<List<KnowledgeAnswerService.Source>>base(
+                () -> new ArrayList<>()));
+        schema.put(EXECUTE, Channels.<Boolean>base(() -> Boolean.TRUE));
 
         schema.put(STARTED_AT, Channels.<Long>base(() -> 0L));
 

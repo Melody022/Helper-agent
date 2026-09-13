@@ -146,12 +146,13 @@ LangGraph from LangChain AI project in Java fashion"*），可与 LangChain4j / 
 
 | 用了 | 位置 | 说明 |
 |---|---|---|
-| **四张独立的 `StateGraph`** | `AbstractReactAgent`、`CompositeGraph`、`RoutingGraph`、`PublishGraph` | ReAct 图 ×4 + 跨域综合图 + 路由链图 + 发布 HITL 图 |
+| **四张独立的 `StateGraph`** | `AbstractReactAgent`、`CompositeGraph`、`RoutingGraph`、`PublishGraph` | ReAct 图 ×4 + 跨域综合图 + **路由链+执行图（11 节点）** + 发布 HITL 图 |
 | **预置 `ReactAgent`** | `AbstractReactAgent` | ReAct 循环由库预置，业务侧不手写节点 |
 | **手写 `StateGraph`** | `CompositeGraph`、`RoutingGraph`、`PublishGraph` | `addNode` / `addEdge` / `addConditionalEdges` / `compile` |
-| **条件边 `addConditionalEdges`** | `RoutingGraph` 4 条、`PublishGraph` 2 条 | 见 6.2 |
+| **条件边 `addConditionalEdges`** | `RoutingGraph` **5 条**、`PublishGraph` 2 条 | 见 6.2 |
 | **`EdgeMappings` 标签映射** | 同上 | **注意它在 `org.bsc.langgraph4j.utils` 包**，不在 `action` 包 |
-| **`CompileConfig` 步数上限** | `RoutingGraph`(15)、`PublishGraph`(8) | 库默认 25 |
+| **`CompileConfig` 步数上限** | `RoutingGraph`(20)、`PublishGraph`(8) | 库默认 25 |
+| **`AsyncNodeActionWithConfig`** | `RoutingGraph.dispatchNode` | 从 `RunnableConfig.metadata` 取每次请求不同的 SSE 回调，不污染 state |
 | **⭐ checkpointer（持久化）** | **`PublishGraph` + `MysqlCheckpointSaver`** | **自实现的 MySQL 存取器**，见 6.2 |
 | **⭐ interrupt（human-in-the-loop）** | **`PublishGraph.awaitConfirm`** | 见 6.2 |
 | **`GraphInput.resume`** | `PublishGraph.resume(...)` | 从挂起点恢复 |
@@ -342,7 +343,8 @@ appender 通道把每次写入追加进同一个 `List`，所以并行安全。*
 
 **讲自己项目的三句话**：
 1. **四张 `StateGraph`**：4 个业务 Agent 的 ReAct 图（库预置 `ReactAgent`）、
-   跨域综合图（并行扇出 + appender 通道汇总）、**路由链图**（7 节点 + 4 条条件边）、
+   跨域综合图（并行扇出 + appender 通道汇总）、**路由链 + 执行图**
+   （11 节点 + 5 条条件边，判定和三条执行路都在这张图上）、
    **发布 HITL 图**（4 节点 + 1 个 interrupt 挂起点）。
 2. **checkpointer 和 interrupt 都用了**，在发布确认上——而且 checkpointer 是**自己实现的
    MySQL 版**（库里只有内存和本地磁盘的）。LangGraph 的招牌能力**全都在项目里有落点**。
