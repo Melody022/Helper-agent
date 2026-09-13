@@ -114,6 +114,44 @@ def esc(s):
     return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
+
+# ══════════════════════════════════════════════════════════════════
+# 图 0：整体分层
+# ══════════════════════════════════════════════════════════════════
+def flow0():
+    W, H = 1120, 560
+    s = Svg(W, H)
+    s.title(40, 42, "整体分层")
+    s.note(40, 66, "四层：接入 → 编排 → 执行 → 存储")
+
+    rows = [
+        ("接入层", 100, [("POST /api/chat", 190), ("/api/chat/stream（SSE）", 200), ("登录拦截器", 150)]),
+        ("编排层", 210, [("对话服务 ChatService", 250), ("路由状态图 RoutingGraph  ★ 骨架", 330)]),
+        ("执行层", 320, [("知识线", 150), ("跨域综合图", 150), ("ReAct 助手 ×4", 160), ("发布图", 150)]),
+        ("存储层", 430, [("MySQL jxj", 160), ("Redis", 140), ("Elasticsearch", 180), ("本地磁盘", 140)]),
+    ]
+    LX, LW = 40, 96
+    row_h = 72
+    for label, y, boxes in rows:
+        s._add(f'<text x="{LX + LW / 2}" y="{y + 40}" font-family="{FONT}" '
+               f'font-size="13.5" font-weight="600" fill="{INK3}" '
+               f'text-anchor="middle">{label}</text>')
+        x = LX + LW + 34
+        for text, w in boxes:
+            emph = "★" in text
+            s.box(x, y, w, row_h, [text.replace("  ★ 骨架", "")],
+                  fill=(PANEL if emph else WHITE),
+                  stroke=("#b9c2cc" if emph else LINE))
+            if emph:
+                s._add(f'<text x="{x + w / 2}" y="{y + row_h - 14}" font-family="{FONT}" '
+                       f'font-size="11.5" fill="{INK3}" text-anchor="middle">★ 骨架就在这张图里</text>')
+            x += w + 20
+    # 层间箭头
+    for y in (100 + row_h, 210 + row_h, 320 + row_h):
+        s.poly([(W / 2, y), (W / 2, y + 38)], marker=False)
+    return s.render()
+
+
 # ══════════════════════════════════════════════════════════════════
 # 图 1：判定段（起点 → ①~⑧）
 # ══════════════════════════════════════════════════════════════════
@@ -283,7 +321,9 @@ def flow2():
 
 def main():
     out = os.path.dirname(os.path.abspath(__file__))
-    for name, svg in [("flow-1-decision.svg", flow1()), ("flow-2-execution.svg", flow2())]:
+    for name, svg in [("flow-0-layers.svg", flow0()),
+                      ("flow-1-decision.svg", flow1()),
+                      ("flow-2-execution.svg", flow2())]:
         io.open(os.path.join(out, name), "w", encoding="utf-8").write(svg)
         print(f"ok {name}")
 
