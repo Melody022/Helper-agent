@@ -1,0 +1,431 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>机械家 AI 客服 —— 架构与流程图</title>
+<style>
+  :root {
+    --bg: #ffffff; --fg: #1f2328; --muted: #656d76; --border: #d0d7de;
+    --card: #f6f8fa; --accent: #0969da;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0d1117; --fg: #e6edf3; --muted: #8b949e; --border: #30363d;
+      --card: #161b22; --accent: #4493f8;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 0 24px 80px;
+    background: var(--bg); color: var(--fg);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", sans-serif;
+    line-height: 1.7;
+  }
+  .wrap { max-width: 1180px; margin: 0 auto; }
+  header {
+    padding: 40px 0 24px; border-bottom: 2px solid var(--border); margin-bottom: 8px;
+  }
+  h1 { margin: 0 0 8px; font-size: 28px; }
+  h2 {
+    margin: 56px 0 16px; font-size: 21px; padding-bottom: 8px;
+    border-bottom: 1px solid var(--border);
+  }
+  h3 { margin: 32px 0 12px; font-size: 17px; }
+  p, li { color: var(--fg); }
+  .lead { color: var(--muted); font-size: 15px; }
+  .note {
+    background: var(--card); border-left: 4px solid var(--accent);
+    padding: 12px 16px; margin: 16px 0; border-radius: 0 6px 6px 0;
+    font-size: 14px;
+  }
+  .note strong { color: var(--accent); }
+  nav {
+    background: var(--card); border: 1px solid var(--border); border-radius: 8px;
+    padding: 16px 20px; margin: 28px 0;
+  }
+  nav ol { margin: 0; padding-left: 22px; }
+  nav a { color: var(--accent); text-decoration: none; }
+  nav a:hover { text-decoration: underline; }
+  .diagram {
+    background: var(--card); border: 1px solid var(--border); border-radius: 8px;
+    padding: 20px; margin: 20px 0; overflow-x: auto;
+  }
+  table { border-collapse: collapse; width: 100%; margin: 16px 0; font-size: 14px; }
+  th, td { border: 1px solid var(--border); padding: 8px 12px; text-align: left; }
+  th { background: var(--card); }
+  code {
+    background: var(--card); padding: 2px 6px; border-radius: 4px;
+    font-family: ui-monospace, Consolas, monospace; font-size: 0.9em;
+  }
+  .warn { color: #d1242f; font-weight: 600; }
+  @media print {
+    body { padding: 0; font-size: 11pt; }
+    nav { display: none; }
+    h2 { page-break-after: avoid; }
+    .diagram { page-break-inside: avoid; border: none; background: none; }
+    header { padding-top: 0; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <h1>机械家 AI 客服 —— 架构与流程图</h1>
+  <p class="lead">二手工程机械平台的 AI 客服 / 导购 Agent ｜ Spring Boot 4.1 + Spring AI 2.0 + LangGraph4j + Elasticsearch</p>
+</header>
+
+<div class="note">
+  <strong>这份是长啥样子的</strong>：全部用 Mermaid 描述，浏览器里直接渲染成图。<br>
+  仓库里的 <code>docs/架构图.md</code> 是同一套图的 markdown 版（给 IDEA / GitHub 渲染）。
+  <span class="warn">改了其中一份记得同步另一份。</span><br>
+  打印友好——面试前可以直接打印出来。
+</div>
+
+<nav>
+  <strong>目录</strong>
+  <ol>
+    <li><a href="#s0">整体分层</a></li>
+    <li><a href="#s1">主流程：一条消息从进来到返回</a></li>
+    <li><a href="#s2">为什么知识线不做成 Agent</a></li>
+    <li><a href="#s3">四张图怎么串起来的</a></li>
+    <li><a href="#s4">发布：另一条独立的线（human-in-the-loop）</a></li>
+    <li><a href="#s5">数据存在哪</a></li>
+    <li><a href="#s6">名词对照</a></li>
+  </ol>
+</nav>
+
+<h2 id="s0">〇、先看这张：整体分层</h2>
+
+<div class="diagram">
+<pre class="mermaid">
+flowchart TD
+    subgraph L0["接入层"]
+        HTTP["POST /api/chat&lt;br/&gt;POST /api/chat/stream（SSE 流式）"]
+        AUTH["登录拦截器&lt;br/&gt;拦 /api/**，令牌存 Redis"]
+    end
+
+    subgraph L1["编排层"]
+        CS["对话服务 ChatService&lt;br/&gt;很薄：生成会话 id / 存消息 / 记飞轮 / 拼返回值"]
+        RG["路由状态图 RoutingGraph&lt;br/&gt;11 个节点 / 5 条条件边&lt;br/&gt;&lt;b&gt;骨架就在这张图里&lt;/b&gt;"]
+    end
+
+    subgraph L2["执行层"]
+        KL["知识线&lt;br/&gt;流水线，不是 Agent"]
+        CG["跨域综合图 CompositeGraph&lt;br/&gt;并行扇出 + 汇总"]
+        RA["ReAct 助手 ×4&lt;br/&gt;模型自己决定调什么工具"]
+        PG["发布图 PublishGraph&lt;br/&gt;interrupt 挂起点 + 检查点"]
+    end
+
+    subgraph L3["存储层"]
+        MY["MySQL jxj&lt;br/&gt;212 张业务表（只读）&lt;br/&gt;18 张 ai_ 表（可读写）"]
+        RD["Redis&lt;br/&gt;令牌 + 会话粘性"]
+        ES["Elasticsearch&lt;br/&gt;jxj_knowledge 索引"]
+    end
+
+    HTTP --&gt; AUTH --&gt; CS --&gt; RG
+    RG --&gt; KL
+    RG --&gt; CG
+    RG --&gt; RA
+    PG -.-&gt;|独立一条线| MY
+    RG --&gt; MY
+    RG --&gt; RD
+    KL --&gt; ES
+    KL --&gt; MY
+
+    style RG fill:#ffe6cc,stroke:#d79b00,stroke-width:2px
+    style KL fill:#d5e8d4,stroke:#82b366
+    style CG fill:#dae8fc,stroke:#6c8ebf
+    style RA fill:#e1d5e7,stroke:#9673a6
+    style PG fill:#fff2cc,stroke:#d6b656
+</pre>
+</div>
+
+<h2 id="s1">一、主流程图：一条消息从进来到返回</h2>
+
+<div class="note">
+  <strong>读法</strong>：①~⑦ 全是<strong>判定</strong>，所有判定最终都汇到 <strong>⑧ 分派</strong>；
+  ⑧ 之后才分岔成四条执行路。<strong>⑧ 是整个图唯一的汇聚点</strong>——
+  代码里 identity / command / scan / known / classify / match 六个节点的出口，指向的都是它。
+</div>
+
+<div class="diagram">
+<pre class="mermaid">
+flowchart TD
+    START(["起点：用户发一句话"])
+    START --&gt; ID
+
+    ID["① 身份检查&lt;br/&gt;查 MySQL 的 ai_user 表"]
+    ID --&gt;|"通过"| CMD
+    ID --&gt;|"拦下：未登录 / 账号不存在 / 账号停用"| D
+
+    CMD["② 系统命令&lt;br/&gt;看是不是 /reset 这类指令"]
+    CMD --&gt;|"没命中"| SCAN
+    CMD --&gt;|"命中 /reset（顺带清 Redis 粘性）"| D
+
+    SCAN["③ 开场扫描&lt;br/&gt;读粘性 + 关键词扫描 + 跨域判定&lt;br/&gt;&lt;b&gt;三件事都是零成本，不叫模型&lt;/b&gt;"]
+    SCAN --&gt;|"同时命中 ≥2 个业务域"| D
+    SCAN --&gt;|"关键词能定案"| KNOWN
+    SCAN --&gt;|"含「那台 / 它」+ 有上一轮"| D
+    SCAN --&gt;|"都不成立"| RESOLVE
+
+    KNOWN["④ 关键词定案&lt;br/&gt;关键词判出的意图 vs 粘性里的意图&lt;br/&gt;一样沿用 / 不一样重新匹配"]
+    KNOWN --&gt;|"产出决策"| D
+
+    RESOLVE["⑤ 指代消解&lt;br/&gt;用最近 5 轮把「那台」补成完整问题&lt;br/&gt;⚠️ 要叫一次本地小模型"]
+    RESOLVE --&gt; CLASSIFY
+
+    CLASSIFY["⑥ 意图分类&lt;br/&gt;第1层 关键词加权 → 第2层 本地小模型 → 第3层 云端大模型"]
+    CLASSIFY --&gt;|"转人工 / 投诉"| D
+    CLASSIFY --&gt;|"模型判出多域"| D
+    CLASSIFY --&gt;|"正常"| MATCH
+
+    MATCH["⑦ 匹配助手&lt;br/&gt;能力注册表 + 角色白名单 + 优先级&lt;br/&gt;匹配不到就用兜底助手（不挂任何工具）"]
+    MATCH --&gt;|"产出决策"| D
+
+    D["⑧ 分 派 ◆&lt;br/&gt;① 先把「这句是啥意图、交给谁」推给前端&lt;br/&gt;② 再由条件边决定走哪条执行路&lt;br/&gt;&lt;b&gt;⚠️ 审计在这之前已经落库&lt;/b&gt;"]
+    D --&gt;|"短路：只回一句话"| E
+    D --&gt;|"知识类 → 问平台规则"| K1
+    D --&gt;|"跨域 → 一句话问了多个域"| C1
+    D --&gt;|"单域 → 正常查数据"| A1
+
+    subgraph KG ["⑨ 知识线作答 — ⚠️ 不是 Agent，是代码写死的流水线"]
+        direction TB
+        K1["① 混合召回 20 条&lt;br/&gt;关键词 BM25 + 语义 KNN，RRF 融合"]
+        K2["② 精排打分&lt;br/&gt;交叉编码器 gte-rerank-v2"]
+        K3{"③ 证据闸&lt;br/&gt;分够不够回答？"}
+        K4["回兜底话术&lt;br/&gt;+ 记进数据飞轮"]
+        K5["④ 回填本体&lt;br/&gt;表格摘要 → 完整表格&lt;br/&gt;命中块 → 同章节邻块"]
+        K6["⑤ 生成答案&lt;br/&gt;模型标 [1][2] 引用角标"]
+        K7{"⑥ 自评&lt;br/&gt;本地小模型核对是否完全基于资料"}
+        K8["出答案 + 溯源依据 sources"]
+
+        K1 --&gt; K2 --&gt; K3
+        K3 --&gt;|"不够"| K4
+        K3 --&gt;|"够"| K5 --&gt; K6 --&gt; K7
+        K7 --&gt;|"不过"| K4
+        K7 --&gt;|"通过"| K8
+    end
+
+    subgraph CG2 ["⑩ 跨域作答 — ⚠️ 真并行，三个域同时跑"]
+        direction TB
+        C1["① 确定要跑哪几个域（最多 3 个）"]
+        C2["② 三个域同时跑&lt;br/&gt;设备 / 租赁 / 知识"]
+        C3["③ 汇总&lt;br/&gt;三份结果合成一条回答"]
+        C1 --&gt; C2 --&gt; C3
+    end
+
+    subgraph AG ["⑪ 单域作答 — ⚠️ 这才是 Agent（ReAct 循环）"]
+        direction TB
+        A1["① 取工具白名单&lt;br/&gt;角色决定能看到哪些工具"]
+        A2{"② 问模型&lt;br/&gt;还要调工具吗？"}
+        A3["③ 执行工具&lt;br/&gt;查数据库"]
+        A4["④ 出答案"]
+        A1 --&gt; A2
+        A2 --&gt;|"要调"| A3
+        A3 --&gt;|"结果丢回给模型"| A2
+        A2 --&gt;|"不用了"| A4
+    end
+
+    E(["⏹ 结束"])
+
+    MERGE["汇聚：所有路径都回到这里&lt;br/&gt;存本轮用户消息 → 认不出意图就记飞轮 → 存助手回复 → 返回前端"]
+    K4 --&gt; MERGE
+    K8 --&gt; MERGE
+    C3 --&gt; MERGE
+    A4 --&gt; MERGE
+    E --&gt; MERGE
+    MERGE --&gt; FIN(["⏹ 结束"])
+
+    style D fill:#ffe6cc,stroke:#d79b00,stroke-width:3px
+    style KG fill:#d5e8d4,stroke:#82b366
+    style CG2 fill:#dae8fc,stroke:#6c8ebf
+    style AG fill:#e1d5e7,stroke:#9673a6
+    style MERGE fill:#f5f5f5,stroke:#666
+</pre>
+</div>
+
+<h3>图上标了三个 ⚠️，那是这张图最值钱的地方</h3>
+<table>
+  <tr><th>标记</th><th>含义</th></tr>
+  <tr><td>⑨ <strong>不是 Agent</strong></td><td>押金 / 租金这类问题走的是<strong>代码写死的流水线</strong>——为了"资料不足不许答"放弃了灵活性</td></tr>
+  <tr><td>⑩ <strong>真并行</strong></td><td>三个域<strong>同时</strong>跑，不是排队；结果各写各的，最后一起收</td></tr>
+  <tr><td>⑪ <strong>这才是 Agent</strong></td><td>循环在 ②↔③：模型自己决定调几次工具、什么时候停手</td></tr>
+</table>
+
+<h3>两条很容易讲错、图上特意标出来的顺序</h3>
+<ul>
+  <li><strong>审计在 ⑧ 之前</strong>（不是之后）——推给前端的和审计记下的必须是同一份判定</li>
+  <li><strong>存用户消息在图之后</strong>——放前面的话，⑤ 指代消解会把这一句自己读进去</li>
+</ul>
+
+<h2 id="s2">二、为什么知识线不做成 Agent</h2>
+
+<p>这是整个项目里最值得讲的一个设计判断。两张图对比：</p>
+
+<div class="diagram">
+<pre class="mermaid">
+flowchart LR
+    subgraph BAD["如果知识线做成 ReAct Agent"]
+        direction TB
+        B1["模型拿到问题&lt;br/&gt;「押金怎么退」"] --&gt; B2{"要不要调检索工具？"}
+        B2 --&gt;|"模型想：&lt;br/&gt;这个我训练数据里见过"| B3["不查资料&lt;br/&gt;直接凭印象答"]
+        B2 --&gt;|"决定查"| B4["检索 → 精排 → 证据闸"]
+        B3 --&gt; B5["❌ 编出一条平台规则&lt;br/&gt;用户拿到自信满满但错误的答案"]
+        B4 --&gt; B6["✅ 正确答案"]
+    end
+
+    subgraph GOOD["实际：知识线是代码写死的流水线"]
+        direction TB
+        G1["用户问题"] --&gt; G2["代码强制：先召回"]
+        G2 --&gt; G3["再精排"]
+        G3 --&gt; G4["再过证据闸"]
+        G4 --&gt;|"资料不够"| G5["✅ 直接回兜底话术&lt;br/&gt;模型压根没机会开口"]
+        G4 --&gt;|"资料够"| G6["✅ 生成答案"]
+    end
+
+    style BAD fill:#f8cecc,stroke:#b85450
+    style GOOD fill:#d5e8d4,stroke:#82b366
+</pre>
+</div>
+
+<p><strong>判据不是"这条线上有没有调模型"，而是"下一步由谁决定"。</strong></p>
+
+<table>
+  <tr><th></th><th>知识线（工作流）</th><th>如果做成 ReAct Agent</th></tr>
+  <tr><td>能跳过检索吗</td><td>不能，顺序写死</td><td class="warn">能</td></tr>
+  <tr><td>能绕过证据闸吗</td><td>不能，闸在生成<strong>之前</strong></td><td class="warn">能</td></tr>
+  <tr><td>会编平台规则吗</td><td>不会</td><td class="warn">可能</td></tr>
+</table>
+
+<h2 id="s3">三、四张图怎么串起来的</h2>
+
+<div class="diagram">
+<pre class="mermaid">
+flowchart TD
+    HTTP["HTTP 请求"] --&gt; CS["对话服务 ChatService"]
+    CS --&gt; RG["&lt;b&gt;路由状态图 RoutingGraph&lt;/b&gt;&lt;br/&gt;11 节点 / 5 条件边"]
+
+    RG --&gt;|"知识类"| KL["知识线&lt;br/&gt;（不是图，是一条 Java 链）"]
+    RG --&gt;|"跨域"| CG["跨域综合图 CompositeGraph&lt;br/&gt;并行扇出 + 汇总"]
+    RG --&gt;|"单域"| RA["ReAct 助手 ×4&lt;br/&gt;库预置 ReactAgent"]
+
+    CG --&gt;|"每个域节点内部调用"| RA
+
+    PA["发布助手 PublishAgent"] -.-&gt;|"独立一条线&lt;br/&gt;不在上面任何图里"| PG["发布图 PublishGraph&lt;br/&gt;4 节点 + interrupt 挂起点&lt;br/&gt;+ MySQL 检查点"]
+
+    style RG fill:#ffe6cc,stroke:#d79b00,stroke-width:2px
+    style PG fill:#fff2cc,stroke:#d6b656
+</pre>
+</div>
+
+<p><strong>"谁决定走向"总结</strong>（这是项目的设计主线）：</p>
+
+<table>
+  <tr><th>图</th><th>谁决定下一步</th><th>用到的 LangGraph 能力</th></tr>
+  <tr><td><code>RoutingGraph</code></td><td><strong>代码</strong></td><td>条件边 ×5、dispatch 汇聚、<code>recursionLimit(20)</code></td></tr>
+  <tr><td><code>CompositeGraph</code></td><td><strong>代码</strong>（决定扇出）</td><td>隐式并行节点、appender 通道、扇入</td></tr>
+  <tr><td><code>ReactAgent</code> ×4</td><td><strong>模型</strong></td><td>库预置 ReAct 循环、工具调用</td></tr>
+  <tr><td><code>PublishGraph</code></td><td><strong>代码</strong></td><td><strong>interrupt 挂起 + checkpointer</strong></td></tr>
+</table>
+
+<h2 id="s4">四、发布：另一条独立的线（human-in-the-loop）</h2>
+
+<div class="diagram">
+<pre class="mermaid">
+flowchart TD
+    U(["用户：帮我发布一台出租"]) --&gt; H
+
+    H["handle&lt;br/&gt;抽字段 + 校验"]
+    H --&gt;|"字段没齐"| ASK["追问缺什么&lt;br/&gt;（模型只负责抽字段）"]
+    ASK --&gt; E1(["⏹ 结束（这一轮到此为止）"])
+
+    H --&gt;|"字段齐了"| SUM["给确认摘要 + 一次性验证码"]
+    SUM --&gt; INT{{"☆ interrupt 挂起 ☆&lt;br/&gt;图停在这里等人&lt;br/&gt;状态写进 ai_graph_checkpoint&lt;br/&gt;⚠️ 进程重启也不丢"}}
+
+    INT --&gt;|"用户下一轮回复"| BR{"用户说了什么？"}
+    BR --&gt;|"取消"| CN["作废草稿"]
+    BR --&gt;|"补充 / 修改"| H
+    BR --&gt;|"确认发布"| W["校验验证码&lt;br/&gt;（有效期 + 是否用过）"]
+    W --&gt;|"验证码不对"| WARN["提示核对"]
+    W --&gt;|"通过"| WRITE["落库，进入待审核"]
+    CN --&gt; E2(["⏹ 结束"])
+    WARN --&gt; E2
+    WRITE --&gt; E2
+
+    style INT fill:#fff2cc,stroke:#d6b656,stroke-width:3px
+</pre>
+</div>
+
+<div class="note">
+  <strong>为什么这里必须用 checkpointer</strong>：图挂起后，下一轮请求得<strong>从挂起点恢复</strong>——
+  "挂在哪"必须有地方存。库里只自带 <code>MemorySaver</code>（重启就没，和项目"状态必须活过重启"的原则冲突）
+  和 <code>FileSystemSaver</code>（写本地磁盘），所以自己实现了一个 <code>MysqlCheckpointSaver</code>。
+</div>
+
+<h2 id="s5">五、数据存在哪</h2>
+
+<div class="diagram">
+<pre class="mermaid">
+flowchart LR
+    subgraph W["一轮对话会写这些"]
+        direction TB
+        W1["审计一条 → ai_audit_log&lt;br/&gt;（在 ⑧ 之前就写了）"]
+        W2["会话粘性 → Redis ai:sticky:*&lt;br/&gt;（命中助手时）"]
+        W3["用户消息 + 助手回复 → ai_message&lt;br/&gt;（在图之后写）"]
+        W4["图检查点 → ai_graph_checkpoint&lt;br/&gt;（只有发布图挂起时）"]
+        W5["飞轮候选 → ai_flywheel_candidate&lt;br/&gt;（意图认不出 / 知识线拒答时）"]
+    end
+</pre>
+</div>
+
+<table>
+  <tr><th>存储</th><th>存什么</th><th>谁在用</th></tr>
+  <tr><td><strong>MySQL <code>jxj</code></strong></td><td>212 张业务表（<strong>只读</strong>，Mapper 分包隔离）+ 18 张 <code>ai_</code> 表</td><td>全部</td></tr>
+  <tr><td><strong>Redis</strong></td><td><code>ai:token:*</code> 登录令牌、<code>ai:sticky:*</code> 会话粘性（TTL 30 分钟）</td><td>鉴权、路由</td></tr>
+  <tr><td><strong>Elasticsearch</strong></td><td><code>jxj_knowledge</code>：22 篇 / 233 个切片（IK 分词 + 1024 维向量）</td><td>知识线</td></tr>
+  <tr><td><strong>本地磁盘</strong></td><td><code>data/knowledge-files/</code>：上传的原件（按内容指纹命名）</td><td>答案溯源跳转</td></tr>
+</table>
+
+<p class="lead">⚠️ ES 里还有个 <code>knowledge_base</code> 索引（42 篇）是别的项目留下的，别动。</p>
+
+<h2 id="s6">六、名词对照</h2>
+
+<table>
+  <tr><th>代码里的名字</th><th>中文</th></tr>
+  <tr><td><code>RoutingGraph</code></td><td>路由状态图（本项目骨架，11 个节点）</td></tr>
+  <tr><td><code>CompositeGraph</code></td><td>跨域综合图</td></tr>
+  <tr><td><code>PublishGraph</code></td><td>发布图</td></tr>
+  <tr><td><code>dispatch</code></td><td>分派（唯一汇聚点）</td></tr>
+  <tr><td><code>resolve</code></td><td>指代消解</td></tr>
+  <tr><td><code>classify</code></td><td>意图分类</td></tr>
+  <tr><td><code>synthesize</code></td><td>汇总（各域结果合成一条）</td></tr>
+  <tr><td><code>interrupt</code></td><td>挂起（图停在那等人）</td></tr>
+  <tr><td><code>checkpointer</code></td><td>检查点（把挂起状态存下来）</td></tr>
+  <tr><td>state / node / edge</td><td>状态 / 节点 / 边</td></tr>
+  <tr><td>条件边</td><td>conditional edge，按条件决定下一个节点</td></tr>
+  <tr><td>reducer / 通道</td><td>多个节点写同一个字段时的合并规则</td></tr>
+  <tr><td>扇出 / 扇入</td><td>fan-out / fan-in</td></tr>
+  <tr><td>ReAct</td><td>推理 + 行动循环（模型想一步 → 调工具 → 看结果 → 再想）</td></tr>
+  <tr><td>Agent</td><td>智能体：<strong>模型决定下一步</strong></td></tr>
+  <tr><td>Workflow</td><td>工作流：<strong>代码决定下一步</strong></td></tr>
+  <tr><td>BM25 / KNN</td><td>关键词检索 / 语义（向量）检索</td></tr>
+  <tr><td>rerank</td><td>精排</td></tr>
+  <tr><td>RRF</td><td>倒数排名融合（把两路检索结果合成一份）</td></tr>
+  <tr><td>证据闸</td><td>判断"资料够不够回答"的那道关</td></tr>
+</table>
+
+</div>
+
+<script src="vendor/mermaid.min.js"></script>
+<script>
+  mermaid.initialize({
+    startOnLoad: true,
+    theme: window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'default',
+    flowchart: { curve: 'basis', useMaxWidth: true, htmlLabels: true },
+    securityLevel: 'loose'
+  });
+</script>
+</body>
+</html>
