@@ -9,12 +9,6 @@
     --bg: #ffffff; --fg: #1f2328; --muted: #656d76; --border: #d0d7de;
     --card: #f6f8fa; --accent: #0969da;
   }
-  @media (prefers-color-scheme: dark) {
-    :root {
-      --bg: #0d1117; --fg: #e6edf3; --muted: #8b949e; --border: #30363d;
-      --card: #161b22; --accent: #4493f8;
-    }
-  }
   * { box-sizing: border-box; }
   body {
     margin: 0; padding: 0 24px 80px;
@@ -48,8 +42,8 @@
   nav a { color: var(--accent); text-decoration: none; }
   nav a:hover { text-decoration: underline; }
   .diagram {
-    background: var(--card); border: 1px solid var(--border); border-radius: 8px;
-    padding: 20px; margin: 20px 0; overflow-x: auto;
+    background: #fff; border: 1px solid var(--border); border-radius: 8px;
+    padding: 16px; margin: 20px 0; overflow-x: auto;
   }
   table { border-collapse: collapse; width: 100%; margin: 16px 0; font-size: 14px; }
   th, td { border: 1px solid var(--border); padding: 8px 12px; text-align: left; }
@@ -134,11 +128,11 @@ flowchart TD
     KL --&gt; ES
     KL --&gt; MY
 
-    style RG fill:#ffe6cc,stroke:#d79b00,stroke-width:2px
-    style KL fill:#d5e8d4,stroke:#82b366
-    style CG fill:#dae8fc,stroke:#6c8ebf
-    style RA fill:#e1d5e7,stroke:#9673a6
-    style PG fill:#fff2cc,stroke:#d6b656
+    style RG fill:#fafbfc,stroke:#b9c2cc,stroke-width:2px
+    style KL fill:#ffffff,stroke:#d0d7de
+    style CG fill:#ffffff,stroke:#d0d7de
+    style RA fill:#ffffff,stroke:#d0d7de
+    style PG fill:#ffffff,stroke:#d0d7de
 </pre>
 </div>
 
@@ -238,10 +232,10 @@ flowchart TD
     E --&gt; MERGE
     MERGE --&gt; FIN(["⏹ 结束"])
 
-    style D fill:#ffe6cc,stroke:#d79b00,stroke-width:3px
-    style KG fill:#d5e8d4,stroke:#82b366
-    style CG2 fill:#dae8fc,stroke:#6c8ebf
-    style AG fill:#e1d5e7,stroke:#9673a6
+    style D fill:#fafbfc,stroke:#b9c2cc,stroke-width:2px
+    style KG fill:#ffffff,stroke:#d0d7de
+    style CG2 fill:#ffffff,stroke:#d0d7de
+    style AG fill:#ffffff,stroke:#d0d7de
     style MERGE fill:#f5f5f5,stroke:#666
 </pre>
 </div>
@@ -249,7 +243,7 @@ flowchart TD
 <h3>判定段：一句话进来，先过七道判定</h3>
 <div class="diagram">
   <img src="assets/flow-1-decision.svg" alt="判定段流程图"
-       style="max-width:none; width:1180px; height:auto">
+       style="max-width:none; width:1230px; height:auto">
 </div>
 <p class="lead">①~⑦ 任何一步"提前定案"，都不继续往下判，统一产出决策汇到 <strong>⑧ 分派</strong>。</p>
 
@@ -299,8 +293,8 @@ flowchart LR
         G4 --&gt;|"资料够"| G6["✅ 生成答案"]
     end
 
-    style BAD fill:#f8cecc,stroke:#b85450
-    style GOOD fill:#d5e8d4,stroke:#82b366
+    style BAD fill:#ffffff,stroke:#d0d7de
+    style GOOD fill:#ffffff,stroke:#d0d7de
 </pre>
 </div>
 
@@ -329,8 +323,8 @@ flowchart TD
 
     PA["发布助手 PublishAgent"] -.-&gt;|"独立一条线&lt;br/&gt;不在上面任何图里"| PG["发布图 PublishGraph&lt;br/&gt;4 节点 + interrupt 挂起点&lt;br/&gt;+ MySQL 检查点"]
 
-    style RG fill:#ffe6cc,stroke:#d79b00,stroke-width:2px
-    style PG fill:#fff2cc,stroke:#d6b656
+    style RG fill:#fafbfc,stroke:#b9c2cc,stroke-width:2px
+    style PG fill:#ffffff,stroke:#d0d7de
 </pre>
 </div>
 
@@ -368,7 +362,7 @@ flowchart TD
     WARN --&gt; E2
     WRITE --&gt; E2
 
-    style INT fill:#fff2cc,stroke:#d6b656,stroke-width:3px
+    style INT fill:#fafbfc,stroke:#b9c2cc,stroke-width:2px
 </pre>
 </div>
 

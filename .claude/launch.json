@@ -4,8 +4,14 @@
     {
       "name": "docs",
       "runtimeExecutable": "python",
-      "runtimeArgs": ["-m", "http.server", "8899", "--directory", "docs"],
-      "port": 8899
+      "runtimeArgs": [
+        "-m",
+        "http.server",
+        "8777",
+        "--directory",
+        "docs"
+      ],
+      "port": 8777
     }
   ]
 }
